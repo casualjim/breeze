@@ -1,0 +1,13 @@
+lancedb>=0.5.0
+fastmcp>=2
+sentence-transformers>=4
+pydantic>=2.0.0
+numpy
+polars
+pyarrow
+orjson
+uvicorn
+pytest
+pytest-asyncio
+einops
+platformdirs>=4

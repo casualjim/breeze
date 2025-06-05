@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  breeze:
+    build: .
+    ports:
+      - "9483:9483"
+    environment:
+      - BREEZE_HOST=0.0.0.0
+      - BREEZE_PORT=9483
+      - BREEZE_DATA_ROOT=/data
+      # Force CPU-only mode for sentence transformers
+      - SENTENCE_TRANSFORMERS_HOME=/data/models
+      - TORCH_DEVICE=cpu
+    volumes:
+      - breeze-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9483/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  breeze-data:

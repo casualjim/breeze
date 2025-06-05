@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "mcp__fetch__fetch",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs",
+      "Bash(uv run pytest:*)",
+      "mcp__zep__search_memory_nodes",
+      "mcp__zep__search_memory_facts",
+      "mcp__zep__get_episodes",
+      "mcp__perplexity-server__search",
+      "Bash(uv run ruff:*)",
+      "WebFetch(domain:gofastmcp.com)"
+    ],
+    "deny": []
+  }
+}

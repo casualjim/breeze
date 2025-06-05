@@ -1,0 +1,22 @@
+[project]
+name = "breeze"
+version = "0.1.0"
+description = "High-performance MCP server for semantic code search and indexing"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "lancedb>=0.5.0",
+    "fastmcp>=2",
+    "sentence-transformers>=4",
+    "pydantic>=2.0.0",
+    "numpy",
+    "polars",
+    "pyarrow",
+    "orjson",
+    "uvicorn",
+    "einops",
+    "platformdirs>=4",
+]
+
+[project.scripts]
+breeze = "breeze.cli:main"
