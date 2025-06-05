@@ -10,33 +10,32 @@ Breeze is an MCP (Model Context Protocol) server that supports streamable HTTP t
 
 - Python version: 3.13
 - Virtual environment: `.venv` directory
-- Dependencies: Listed in `requirements.txt` (lancedb, fastmcp)
+- Dependencies: Listed in `pyproject.toml` (lancedb, fastmcp)
 
 ## Common Commands
 
 ### Install dependencies
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ### Run the application
 
 ```bash
-python main.py
+uv run python -m breeze serve
 ```
 
 ### Run tests
 
 ```bash
-pytest
+uv run pytest
 ```
 
 ## Project Structure
 
 - `main.py` - Entry point for the application
 - `pyproject.toml` - Project configuration
-- `requirements.txt` - Python dependencies
 
 ## Key Technologies
 
@@ -56,3 +55,7 @@ pytest
 ## Guidelines for Modification
 
 DO NOT ADD FILES, MODIFY THE EXISTING ONES
+
+## Technology Preferences
+
+- Use polars instead of pandas

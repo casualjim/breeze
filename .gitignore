@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Code Index MCP cache directory
+.code_indexer/
+
+# Generated plist file (keep template only)
+com.breeze-mcp.server.plist
+
+.env
+/test_*.py

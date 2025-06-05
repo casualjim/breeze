@@ -1,10 +1,40 @@
 """Data models for Breeze code indexing using Pydantic v2."""
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import List, Optional, Dict, Any
+import uuid
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 from lancedb.pydantic import LanceModel, Vector
+
+
+class RetryStatus(str, Enum):
+    """Status of retry attempts."""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    ABANDONED = "abandoned"
+
+
+class FailedBatch(LanceModel):
+    """Model for tracking failed indexing batches."""
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    batch_id: str = Field(description="Unique identifier for this batch")
+    file_paths: List[str] = Field(description="List of file paths in this batch")
+    content_hashes: List[str] = Field(description="Content hashes for deduplication")
+    error_message: str = Field(description="Last error message")
+    retry_count: int = Field(default=0, description="Number of retry attempts")
+    max_retries: int = Field(default=5, description="Maximum retries before abandoning")
+    status: str = Field(default="pending", description="Status: pending, processing, succeeded, failed, abandoned")
+    created_at: datetime = Field(default_factory=lambda: datetime.now())
+    last_retry_at: Optional[datetime] = Field(default=None)
+    next_retry_at: Optional[datetime] = Field(default=None, description="When to retry next")
+    project_id: Optional[str] = Field(default=None, description="Associated project if any")
 
 
 class CodeDocument(LanceModel):
@@ -20,23 +50,7 @@ class CodeDocument(LanceModel):
     last_modified: datetime = Field(description="Last modification time of the file")
     indexed_at: datetime = Field(description="Time when the file was indexed")
     content_hash: str = Field(description="SHA256 hash of the file content")
-    vector: Vector(dim=768) = Field(  # type: ignore
-        description="Embedding vector"
-    )  # CodeRankEmbed produces 768-dim vectors
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for database storage."""
-        return {
-            "id": self.id,
-            "file_path": self.file_path,
-            "content": self.content,
-            "file_type": self.file_type,
-            "file_size": self.file_size,
-            "last_modified": self.last_modified,
-            "indexed_at": self.indexed_at,
-            "content_hash": self.content_hash,
-            "vector": self.vector,
-        }
+    # Vector field will be added dynamically based on the embedding model
 
 
 class SearchResult(BaseModel):
@@ -51,17 +65,6 @@ class SearchResult(BaseModel):
     snippet: str
     last_modified: datetime
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "id": self.id,
-            "file_path": self.file_path,
-            "file_type": self.file_type,
-            "relevance_score": self.relevance_score,
-            "snippet": self.snippet,
-            "last_modified": self.last_modified.isoformat(),
-        }
-
 
 class IndexStats(BaseModel):
     """Statistics for indexing operations."""
@@ -73,6 +76,61 @@ class IndexStats(BaseModel):
     errors: int = 0
     total_tokens_processed: int = 0
 
-    def to_dict(self) -> Dict[str, int]:
-        """Convert to dictionary for JSON serialization."""
-        return self.model_dump()
+
+class Project(LanceModel):
+    """Represents a tracked project/repository in LanceDB."""
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = Field(description="Project name")
+    paths: List[str] = Field(description="List of paths to track")
+    created_at: datetime = Field(default_factory=lambda: datetime.now())
+    updated_at: datetime = Field(default_factory=lambda: datetime.now())
+    last_indexed: Optional[datetime] = Field(default=None, description="Last indexing time")
+    is_watching: bool = Field(default=False, description="Whether file watching is active")
+    file_extensions: List[str] = Field(default_factory=list, description="File extensions to index")
+    exclude_patterns: List[str] = Field(default_factory=list, description="Patterns to exclude")
+    auto_index: bool = Field(default=True, description="Auto-index on file changes")
+
+
+class IndexingTask(BaseModel):
+    """Represents an active indexing task."""
+    
+    task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: Optional[str] = Field(default=None)
+    paths: List[str]
+    started_at: datetime = Field(default_factory=lambda: datetime.now())
+    completed_at: Optional[datetime] = None
+    status: str = Field(default="pending")  # pending, running, completed, failed
+    progress: float = Field(default=0.0)
+    total_files: int = Field(default=0)
+    processed_files: int = Field(default=0)
+    error_message: Optional[str] = None
+    
+
+def get_code_document_schema(embedding_model):
+    """Get CodeDocument schema with embedding function configured.
+    
+    Args:
+        embedding_model: The embedding model from LanceDB registry
+    
+    Returns:
+        A CodeDocument class with vector field configured for the embedding model
+    """
+    class CodeDocumentWithEmbedding(LanceModel):
+        """Code document with embedding vector."""
+        
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+        
+        id: str = Field(description="Unique identifier for the document")
+        file_path: str = Field(description="Path to the code file")
+        content: str = embedding_model.SourceField()
+        file_type: str = Field(description="File extension without dot")
+        file_size: int = Field(description="Size of the file in bytes")
+        last_modified: datetime = Field(description="Last modification time of the file")
+        indexed_at: datetime = Field(description="Time when the file was indexed")
+        content_hash: str = Field(description="SHA256 hash of the file content")
+        vector: Vector(embedding_model.ndims()) = embedding_model.VectorField(default=None)
+    
+    return CodeDocumentWithEmbedding

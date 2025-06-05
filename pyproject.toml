@@ -14,11 +14,26 @@ dependencies = [
     "pyarrow",
     "orjson",
     "uvicorn",
+    "anyio",
     "einops",
     "platformdirs>=4",
     "typer>=0.16.0",
     "rich>=14.0.0",
+    "watchdog>=6.0.0",
+    "aiofiles>=24.1.0",
+    "python-magic>=0.4.27",
+    "identify>=2.6.12",
+    "voyageai>=0.3.2",
+    "openai>=1.84.0",
+    "cohere>=5.15.0",
+    "google-generativeai>=0.8.5",
+    "python-dotenv",
+    "tokenizers>=0.21.0",
+    "tenacity>=9",
 ]
 
 [project.scripts]
 breeze = "breeze.cli:main"
+
+[dependency-groups]
+dev = ["ruff>=0.11.12"]

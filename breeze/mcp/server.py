@@ -8,14 +8,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
+from fastmcp.utilities.logging import get_logger
 
 from breeze.core import BreezeEngine, BreezeConfig
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+# Use FastMCP's logging utility for consistent formatting
+logger = get_logger("breeze.server")
 
 # Create MCP server with SSE support
 mcp = FastMCP(
@@ -44,7 +42,15 @@ async def get_engine() -> BreezeEngine:
                 embedding_model=os.environ.get(
                     "BREEZE_EMBEDDING_MODEL", "nomic-ai/CodeRankEmbed"
                 ),
+                embedding_device=os.environ.get(
+                    "BREEZE_EMBEDDING_DEVICE", "cpu"
+                ),  # Will auto-detect if cpu
                 trust_remote_code=True,
+                embedding_api_key=os.environ.get("BREEZE_EMBEDDING_API_KEY"),
+                concurrent_readers=int(os.environ.get("BREEZE_CONCURRENT_READERS", "20")),
+                concurrent_embedders=int(os.environ.get("BREEZE_CONCURRENT_EMBEDDERS", "10")),
+                concurrent_writers=int(os.environ.get("BREEZE_CONCURRENT_WRITERS", "10")),
+                voyage_concurrent_requests=int(os.environ.get("BREEZE_VOYAGE_CONCURRENT_REQUESTS", "5")),
             )
             engine = BreezeEngine(config)
             try:
@@ -99,26 +105,28 @@ async def index_repository(
         
         async def index_with_notifications():
             try:
-                # Send start notification
-                await mcp.notification(
-                    method="indexing/started",
-                    params={
-                        "task_id": task_id,
-                        "directories": valid_dirs,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
-                
-                # Define progress callback
-                async def progress_callback(progress):
+                # Send start notification if supported
+                if hasattr(mcp, 'notification'):
                     await mcp.notification(
-                        method="indexing/progress",
+                        method="indexing/started",
                         params={
                             "task_id": task_id,
-                            "progress": progress,
+                            "directories": valid_dirs,
                             "timestamp": datetime.now().isoformat(),
                         }
                     )
+                
+                # Define progress callback
+                async def progress_callback(progress):
+                    if hasattr(mcp, 'notification'):
+                        await mcp.notification(
+                            method="indexing/progress",
+                            params={
+                                "task_id": task_id,
+                                "progress": progress,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
                 
                 # Perform the actual indexing with progress callback
                 stats = await engine.index_directories(
@@ -126,39 +134,41 @@ async def index_repository(
                 )
                 
                 # Send completion notification
-                await mcp.notification(
-                    method="indexing/completed", 
-                    params={
-                        "task_id": task_id,
-                        "statistics": stats.to_dict(),
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+                if hasattr(mcp, 'notification'):
+                    await mcp.notification(
+                        method="indexing/completed", 
+                        params={
+                            "task_id": task_id,
+                            "statistics": stats.model_dump(),
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
                 
                 return stats
                 
             except Exception as e:
                 # Send error notification
-                await mcp.notification(
-                    method="indexing/error",
-                    params={
-                        "task_id": task_id,
-                        "error": str(e),
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+                if hasattr(mcp, 'notification'):
+                    await mcp.notification(
+                        method="indexing/error",
+                        params={
+                            "task_id": task_id,
+                            "error": str(e),
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
                 raise
         
         # Run indexing and wait for completion
         # In a production system, you might want to run this in background
         # and return immediately with the task_id
         stats = await index_with_notifications()
-        logger.info(f"Indexing completed: {stats.to_dict()}")
+        logger.info(f"Indexing completed: {stats.model_dump()}")
 
         return {
             "status": "success",
             "message": "Indexing completed successfully",
-            "statistics": stats.to_dict(),
+            "statistics": stats.model_dump(),
             "indexed_directories": valid_dirs,
             "task_id": task_id,
         }
@@ -205,7 +215,7 @@ async def search_code(
             "status": "success",
             "query": query,
             "total_results": len(results),
-            "results": [result.to_dict() for result in results],
+            "results": [result.model_dump() for result in results],
         }
 
     except Exception as e:
@@ -295,6 +305,178 @@ async def list_directory(directory_path: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+@mcp.tool()
+async def register_project(
+    name: str,
+    paths: List[str],
+    auto_index: bool = True
+) -> Dict[str, Any]:
+    """
+    Register a new project and start watching it for changes.
+    
+    This will:
+    1. Register the project in the database
+    2. Optionally perform initial indexing
+    3. Start watching for file changes
+    
+    Args:
+        name: Name of the project
+        paths: List of directory paths to track
+        auto_index: Whether to perform initial indexing (default: True)
+    
+    Returns:
+        Project registration details including project ID
+    """
+    try:
+        engine = await get_engine()
+        
+        # Register the project
+        project = await engine.add_project(
+            name=name,
+            paths=paths,
+            auto_index=auto_index
+        )
+        
+        # Define event callback for file watching notifications
+        async def watch_callback(event):
+            if hasattr(mcp, 'notification'):
+                await mcp.notification(
+                    method=f"watching/{event['type']}",
+                    params=event
+                )
+        
+        # Start watching the project
+        watch_success = await engine.start_watching(project.id, watch_callback)
+        
+        result = {
+            "status": "success",
+            "project_id": project.id,
+            "name": project.name,
+            "paths": project.paths,
+            "watching": watch_success,
+            "message": f"Project '{name}' registered and watching started"
+        }
+        
+        # Optionally perform initial indexing
+        if auto_index:
+            # Create indexing task with progress notifications
+            task = await engine.create_indexing_task(
+                paths=project.paths,
+                project_id=project.id,
+                progress_callback=lambda p: asyncio.create_task(
+                    mcp.notification(
+                        method="indexing/progress",
+                        params={
+                            "project_id": project.id,
+                            "project_name": project.name,
+                            **p
+                        }
+                    )
+                ) if hasattr(mcp, 'notification') else None
+            )
+            result["indexing_task_id"] = task.task_id
+            result["message"] += f". Initial indexing started (task: {task.task_id})"
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error registering project: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+async def unregister_project(project_id: str) -> Dict[str, Any]:
+    """
+    Unregister a project, stop watching it, and remove it from tracking.
+    
+    This will stop file watching and remove the project from the database.
+    The indexed code will remain searchable.
+    
+    Args:
+        project_id: ID of the project to unregister
+    
+    Returns:
+        Confirmation of project removal
+    """
+    try:
+        engine = await get_engine()
+        
+        # Get project info before removing
+        project = await engine.get_project(project_id)
+        if not project:
+            return {
+                "status": "error",
+                "message": f"Project not found: {project_id}"
+            }
+        
+        # Remove the project (this also stops watching)
+        success = await engine.remove_project(project_id)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Project '{project.name}' unregistered and watching stopped",
+                "project_id": project_id,
+                "name": project.name
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Failed to unregister project: {project_id}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error unregistering project: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+async def list_projects() -> Dict[str, Any]:
+    """
+    List all registered projects with their current status.
+    
+    Returns:
+        List of all projects with their details including watch status
+    """
+    try:
+        engine = await get_engine()
+        projects = await engine.list_projects()
+        
+        # Get active indexing tasks
+        tasks = await engine.list_indexing_tasks()
+        active_tasks_by_project = {}
+        for task in tasks:
+            if task.project_id and task.status == "running":
+                active_tasks_by_project[task.project_id] = {
+                    "task_id": task.task_id,
+                    "progress": task.progress,
+                    "files_processed": task.processed_files,
+                    "total_files": task.total_files
+                }
+        
+        return {
+            "status": "success",
+            "total_projects": len(projects),
+            "projects": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "paths": p.paths,
+                    "is_watching": p.is_watching,
+                    "last_indexed": p.last_indexed.isoformat() if p.last_indexed else None,
+                    "created_at": p.created_at.isoformat(),
+                    "updated_at": p.updated_at.isoformat(),
+                    "active_indexing": active_tasks_by_project.get(p.id)
+                }
+                for p in projects
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing projects: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 # Create ASGI app with both transports
 def create_app():
     """Create Starlette app with both SSE and HTTP transports."""
@@ -336,6 +518,9 @@ def create_app():
                 yield
         
         logger.info("Shutting down Breeze MCP server...")
+        global engine
+        if engine:
+            await engine.shutdown()
     
     # Create Starlette app with combined lifespan
     app = Starlette(

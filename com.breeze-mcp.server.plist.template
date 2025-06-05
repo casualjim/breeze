@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.breeze-mcp.server</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PYTHON_PATH}}</string>
+        <string>-m</string>
+        <string>breeze</string>
+        <string>serve</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>{{WORKING_DIR}}</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{{VENV_BIN}}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+        <key>BREEZE_HOST</key>
+        <string>{{BREEZE_HOST}}</string>
+        <key>BREEZE_PORT</key>
+        <string>{{BREEZE_PORT}}</string>
+        <key>BREEZE_DATA_ROOT</key>
+        <string>{{BREEZE_DATA_ROOT}}</string>
+        <key>BREEZE_EMBEDDING_MODEL</key>
+        <string>{{BREEZE_EMBEDDING_MODEL}}</string>
+        <key>BREEZE_EMBEDDING_API_KEY</key>
+        <string>{{BREEZE_EMBEDDING_API_KEY}}</string>
+        <key>BREEZE_DB_NAME</key>
+        <string>{{BREEZE_DB_NAME}}</string>
+        <key>BREEZE_EMBEDDING_DEVICE</key>
+        <string>{{BREEZE_EMBEDDING_DEVICE}}</string>
+        <key>BREEZE_CONCURRENT_READERS</key>
+        <string>{{BREEZE_CONCURRENT_READERS}}</string>
+        <key>BREEZE_CONCURRENT_EMBEDDERS</key>
+        <string>{{BREEZE_CONCURRENT_EMBEDDERS}}</string>
+        <key>BREEZE_CONCURRENT_WRITERS</key>
+        <string>{{BREEZE_CONCURRENT_WRITERS}}</string>
+        <key>BREEZE_VOYAGE_CONCURRENT_REQUESTS</key>
+        <string>{{BREEZE_VOYAGE_CONCURRENT_REQUESTS}}</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>VIRTUAL_ENV</key>
+        <string>{{VIRTUAL_ENV}}</string>
+    </dict>
+    
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/breeze-mcp.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/breeze-mcp.error.log</string>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

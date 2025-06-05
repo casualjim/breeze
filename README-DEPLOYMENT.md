@@ -5,9 +5,31 @@
 For best performance on Apple Silicon Macs, run natively to access MPS hardware acceleration:
 
 ### Option 1: LaunchAgent (Auto-start)
+
+First, configure your settings by copying and editing the example configuration:
+
 ```bash
-# Install as a LaunchAgent
-./install-launchd.sh
+# Copy the example configuration
+cp .env.example .env
+
+# Edit .env with your settings (especially API keys for cloud models)
+# See .env.example for all available options
+```
+
+Then install as a LaunchAgent:
+
+```bash
+# Install dependencies
+pip install python-dotenv jinja2
+
+# Install as a LaunchAgent (reads from .env automatically)
+python install-launchd.py
+
+# The installer will:
+# - Detect your virtual environment
+# - Read configuration from .env file
+# - Generate the plist from template
+# - Install and start the service
 
 # Check status
 launchctl list | grep breeze
@@ -19,6 +41,18 @@ tail -f /usr/local/var/log/breeze-mcp.log
 launchctl unload ~/Library/LaunchAgents/com.breeze-mcp.server.plist
 launchctl load ~/Library/LaunchAgents/com.breeze-mcp.server.plist
 ```
+
+#### Configuration Options
+
+All configuration can be set via environment variables or in `.env` file:
+
+- **Server Settings**: `BREEZE_HOST`, `BREEZE_PORT`
+- **Data Storage**: `BREEZE_DATA_ROOT`, `BREEZE_DB_NAME`
+- **Embedding Models**: `BREEZE_EMBEDDING_MODEL`, `BREEZE_EMBEDDING_DEVICE`, `BREEZE_EMBEDDING_API_KEY`
+- **Performance**: `BREEZE_CONCURRENT_READERS`, `BREEZE_CONCURRENT_EMBEDDERS`, `BREEZE_CONCURRENT_WRITERS`
+- **Search**: `BREEZE_DEFAULT_LIMIT`, `BREEZE_MIN_RELEVANCE`
+
+See `.env.example` for complete documentation of all options.
 
 ### Option 2: Direct Execution
 ```bash

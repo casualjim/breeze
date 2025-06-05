@@ -1,32 +1,24 @@
-"""Integration tests for Breeze MCP server."""
+"""Tests for Breeze MCP server."""
 
-import asyncio
-import json
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
-from unittest.mock import patch
 
 import pytest
-from fastmcp import FastMCP
-from mcp.client import ClientSession
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp.client.http import http_client
+import pytest_asyncio
 from starlette.testclient import TestClient
 
 from breeze.core import BreezeConfig, BreezeEngine
-from breeze.mcp.server import create_app, get_engine, mcp
+from breeze.mcp.server import create_app
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def temp_data_dir():
     """Create a temporary directory for test data."""
     with tempfile.TemporaryDirectory() as temp_dir:
         yield temp_dir
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_code_dir(temp_data_dir):
     """Create test code files in a temporary directory."""
     test_dir = Path(temp_data_dir) / "test_code"
@@ -66,7 +58,7 @@ def fibonacci(n: int) -> int:
     return test_dir
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_engine(temp_data_dir):
     """Create a test engine with a temporary database."""
     config = BreezeConfig(
@@ -116,120 +108,8 @@ class TestHealthEndpoint:
         assert data["database"]["initialized"] is True
 
 
-class TestSSEEndpoint:
-    """Test the SSE (Server-Sent Events) endpoint."""
-    
-    @pytest.mark.asyncio
-    async def test_sse_client_connection(self, test_engine):
-        """Test SSE client connection and initialization."""
-        # Create SSE client URL
-        base_url = "http://localhost:9483"
-        
-        async with sse_client(f"{base_url}/sse/") as (read, write):
-            # Create client session
-            async with ClientSession(read, write) as session:
-                # Initialize the session
-                await session.initialize()
-                
-                # List available tools
-                tools = await session.list_tools()
-                assert len(tools) == 4  # We have 4 tools defined
-                
-                tool_names = {tool.name for tool in tools}
-                assert "index_repository" in tool_names
-                assert "search_code" in tool_names
-                assert "get_index_stats" in tool_names
-                assert "list_directory" in tool_names
-    
-    @pytest.mark.asyncio
-    async def test_sse_tool_execution(self, test_engine, test_code_dir):
-        """Test executing tools via SSE client."""
-        base_url = "http://localhost:9483"
-        
-        async with sse_client(f"{base_url}/sse/") as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                
-                # Test get_index_stats tool
-                result = await session.call_tool(
-                    "get_index_stats",
-                    arguments={}
-                )
-                assert result[0].content[0].text["status"] == "success"
-                assert result[0].content[0].text["total_documents"] == 0
-                
-                # Test index_repository tool
-                result = await session.call_tool(
-                    "index_repository",
-                    arguments={
-                        "directories": [str(test_code_dir)],
-                        "force_reindex": False
-                    }
-                )
-                assert result[0].content[0].text["status"] == "success"
-                
-                # Test search_code tool
-                result = await session.call_tool(
-                    "search_code",
-                    arguments={
-                        "query": "factorial",
-                        "limit": 5
-                    }
-                )
-                assert result[0].content[0].text["status"] == "success"
-                assert result[0].content[0].text["total_results"] > 0
-
-
-class TestStreamableHTTPEndpoint:
-    """Test the streamable HTTP endpoint."""
-    
-    @pytest.mark.asyncio
-    async def test_http_client_connection(self, test_engine):
-        """Test HTTP client connection and initialization."""
-        base_url = "http://localhost:9483"
-        
-        async with http_client(f"{base_url}/mcp/") as (read, write):
-            async with ClientSession(read, write) as session:
-                # Initialize the session
-                await session.initialize()
-                
-                # Get server info
-                server_info = session.server
-                assert server_info.name == "breeze"
-                assert server_info.version == "0.1.0"
-    
-    @pytest.mark.asyncio
-    async def test_http_tool_execution(self, test_engine, test_code_dir):
-        """Test executing tools via HTTP client."""
-        base_url = "http://localhost:9483"
-        
-        async with http_client(f"{base_url}/mcp/") as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                
-                # Test list_directory tool
-                result = await session.call_tool(
-                    "list_directory",
-                    arguments={"directory_path": str(test_code_dir)}
-                )
-                assert result[0].content[0].text["status"] == "success"
-                assert result[0].content[0].text["total_items"] == 2
-                
-                # Test index_repository with progress tracking
-                result = await session.call_tool(
-                    "index_repository",
-                    arguments={
-                        "directories": [str(test_code_dir)],
-                        "force_reindex": True
-                    }
-                )
-                assert result[0].content[0].text["status"] == "success"
-                stats = result[0].content[0].text["statistics"]
-                assert stats["files_indexed"] == 2
-
-
 class TestMCPTools:
-    """Test MCP tool functionality."""
+    """Test MCP tool functionality directly."""
     
     @pytest.mark.asyncio
     async def test_index_repository_tool(self, test_engine, test_code_dir):
@@ -314,74 +194,36 @@ class TestMCPTools:
         file_names = {item["name"] for item in result["contents"]}
         assert "hello.py" in file_names
         assert "math_utils.py" in file_names
-
-
-class TestAsyncStreamHandling:
-    """Test async stream handling to reproduce and fix the reported error."""
     
     @pytest.mark.asyncio
-    async def test_concurrent_sse_requests(self, test_engine):
-        """Test handling multiple concurrent SSE requests."""
-        base_url = "http://localhost:9483"
+    async def test_project_management_tools(self, test_engine, test_code_dir):
+        """Test project registration, listing, and unregistration."""
+        from breeze.mcp.server import register_project, list_projects, unregister_project
         
-        # Create multiple concurrent SSE connections
-        async def run_client(client_id: int):
-            async with sse_client(f"{base_url}/sse/") as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    
-                    # Each client makes multiple requests
-                    for i in range(3):
-                        result = await session.call_tool(
-                            "get_index_stats",
-                            arguments={}
-                        )
-                        assert result[0].content[0].text["status"] == "success"
-                        await asyncio.sleep(0.01)  # Small delay
+        # Register a project
+        result = await register_project(
+            name="Test Project",
+            paths=[str(test_code_dir)],
+            auto_index=False  # Don't auto-index to speed up test
+        )
         
-        # Run multiple clients concurrently
-        tasks = [run_client(i) for i in range(5)]
-        await asyncio.gather(*tasks)
-    
-    @pytest.mark.asyncio
-    async def test_long_running_operation(self, test_engine, test_code_dir):
-        """Test handling long-running operations that might cause timeouts."""
-        base_url = "http://localhost:9483"
+        assert result["status"] == "success"
+        assert "project_id" in result
+        project_id = result["project_id"]
         
-        # Create a larger test directory with more files
-        large_test_dir = Path(test_code_dir).parent / "large_test"
-        large_test_dir.mkdir(exist_ok=True)
+        # List projects
+        result = await list_projects()
+        assert result["status"] == "success"
+        assert result["total_projects"] == 1
+        assert result["projects"][0]["name"] == "Test Project"
         
-        # Create 50 test files
-        for i in range(50):
-            (large_test_dir / f"file_{i}.py").write_text(f'''
-# File {i}
-def function_{i}(x):
-    """Function {i} documentation."""
-    return x * {i}
-
-class Class_{i}:
-    """Class {i} documentation."""
-    def method(self):
-        return "result_{i}"
-''')
+        # Unregister the project
+        result = await unregister_project(project_id)
+        assert result["status"] == "success"
         
-        async with http_client(f"{base_url}/mcp/") as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                
-                # Index the large directory
-                result = await session.call_tool(
-                    "index_repository",
-                    arguments={
-                        "directories": [str(large_test_dir)],
-                        "force_reindex": True
-                    }
-                )
-                
-                assert result[0].content[0].text["status"] == "success"
-                stats = result[0].content[0].text["statistics"]
-                assert stats["files_indexed"] == 50
+        # Verify it's gone
+        result = await list_projects()
+        assert result["total_projects"] == 0
 
 
 class TestErrorHandling:

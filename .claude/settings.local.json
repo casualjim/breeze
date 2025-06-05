@@ -16,7 +16,12 @@
       "mcp__breeze__index_repository",
       "mcp__breeze__search_code",
       "Bash(uv run:*)",
-      "mcp__perplexity-server__get_documentation"
+      "mcp__perplexity-server__get_documentation",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "mcp__code-index__set_project_path",
+      "mcp__code-index__search_code",
+      "mcp__code-index__get_file_summary"
     ],
     "deny": []
   }
