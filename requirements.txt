@@ -9,5 +9,9 @@ orjson
 uvicorn
 pytest
 pytest-asyncio
+httpx
+anyio
 einops
 platformdirs>=4
+typer>=0.16.0
+rich>=14.0.0

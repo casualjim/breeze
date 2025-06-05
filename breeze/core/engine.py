@@ -5,7 +5,7 @@ import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Callable, Dict, List, Optional
 
 import lancedb
 from sentence_transformers import SentenceTransformer
@@ -28,6 +28,7 @@ class BreezeEngine:
         self.model: Optional[SentenceTransformer] = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        self._embedding_semaphore = asyncio.Semaphore(10)  # Limit concurrent embeddings
 
     async def initialize(self):
         """Initialize the database and embedding model."""
@@ -79,18 +80,21 @@ class BreezeEngine:
             logger.info("BreezeEngine initialization complete")
 
     async def index_directories(
-        self, directories: List[str], force_reindex: bool = False
+        self, directories: List[str], force_reindex: bool = False, 
+        progress_callback: Optional[Callable] = None, num_workers: int = 20
     ) -> IndexStats:
-        """Index code files from specified directories."""
+        """Index code files from specified directories with concurrent workers."""
         await self.initialize()
 
         stats = IndexStats()
+        stats_lock = asyncio.Lock()
         processed_files = set()
 
         # Get existing documents for update/skip logic
         existing_docs = await self._get_existing_docs() if not force_reindex else {}
 
-        # Process each directory
+        # Collect all files to process
+        all_files = []
         for directory in directories:
             path = Path(directory).resolve()
             if not path.exists() or not path.is_dir():
@@ -98,21 +102,85 @@ class BreezeEngine:
                 stats.errors += 1
                 continue
 
-            # Process files using async generator
+            # Collect files
+            files_in_dir = 0
             async for file_path in self._walk_directory_async(path):
-                if file_path in processed_files:
-                    continue
+                if file_path not in processed_files:
+                    processed_files.add(file_path)
+                    all_files.append(file_path)
+                    files_in_dir += 1
+            logger.info(f"Found {files_in_dir} code files in {path}")
 
-                processed_files.add(file_path)
-                stats.files_scanned += 1
+        logger.info(f"Found {len(all_files)} files to process with {num_workers} workers")
+        
+        import time
+        start_time = time.time()
+
+        # Create a queue for files to process
+        file_queue = asyncio.Queue()
+        for file_path in all_files:
+            await file_queue.put(file_path)
+
+        # Worker function
+        async def worker(worker_id: int):
+            while True:
+                try:
+                    file_path = await asyncio.wait_for(file_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    break
 
                 try:
-                    await self._process_file(
-                        file_path, existing_docs, force_reindex, stats
+                    # Process the file
+                    result = await self._process_file_with_result(
+                        file_path, existing_docs, force_reindex
                     )
+                    
+                    # Update stats thread-safely
+                    async with stats_lock:
+                        stats.files_scanned += 1
+                        if result == "indexed":
+                            stats.files_indexed += 1
+                        elif result == "updated":
+                            stats.files_updated += 1
+                        elif result == "skipped":
+                            stats.files_skipped += 1
+                        elif result == "error":
+                            stats.errors += 1
+                        
+                        # Call progress callback if provided
+                        if progress_callback:
+                            await progress_callback({
+                                "files_scanned": stats.files_scanned,
+                                "files_indexed": stats.files_indexed,
+                                "files_updated": stats.files_updated,
+                                "files_skipped": stats.files_skipped,
+                                "errors": stats.errors,
+                                "current_file": str(file_path),
+                                "total_files": len(all_files),
+                            })
+                        
                 except Exception as e:
-                    logger.error(f"Error processing {file_path}: {e}")
-                    stats.errors += 1
+                    logger.error(f"Worker {worker_id} error processing {file_path}: {e}")
+                    async with stats_lock:
+                        stats.errors += 1
+
+                file_queue.task_done()
+
+        # Start workers
+        workers = [asyncio.create_task(worker(i)) for i in range(num_workers)]
+        
+        # Wait for all files to be processed
+        await file_queue.join()
+        
+        # Cancel workers
+        for w in workers:
+            w.cancel()
+        
+        # Wait for workers to finish
+        await asyncio.gather(*workers, return_exceptions=True)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Indexing completed in {elapsed:.2f} seconds ({len(all_files)/elapsed:.2f} files/sec)")
 
         return stats
 
@@ -187,15 +255,20 @@ class BreezeEngine:
         existing_docs = {}
         try:
             loop = asyncio.get_event_loop()
-            # Use to_polars() which returns a LazyFrame
-            ldf = await loop.run_in_executor(None, self.table.to_polars)
-            # Collect only the columns we need
-            df = await loop.run_in_executor(
-                None, 
-                lambda: ldf.select(["id", "content_hash"]).collect()
-            )
-            if df.height > 0:
-                for row in df.iter_rows(named=True):
+            # LanceDB's to_polars() might have issues with batch_size parameter
+            # Let's use a different approach
+            # Get the table as an arrow table first, then convert to polars
+            arrow_table = await loop.run_in_executor(None, self.table.to_arrow)
+            
+            # Convert Arrow table to Polars
+            import polars as pl
+            df = pl.from_arrow(arrow_table)
+            
+            # Select only the columns we need
+            df_subset = df.select(["id", "content_hash"])
+            
+            if df_subset.height > 0:
+                for row in df_subset.iter_rows(named=True):
                     existing_docs[row["id"]] = row["content_hash"]
         except Exception as e:
             logger.warning(f"Error reading existing documents: {e}")
@@ -231,88 +304,93 @@ class BreezeEngine:
         for file in files:
             yield file
 
-    async def _process_file(
+    async def _process_file_with_result(
         self,
         file_path: Path,
         existing_docs: Dict[str, str],
         force_reindex: bool,
-        stats: IndexStats,
-    ):
-        """Process a single file for indexing."""
+    ) -> str:
+        """Process a single file for indexing and return result status."""
         loop = asyncio.get_event_loop()
 
-        # Check file size
-        file_stat = await loop.run_in_executor(None, file_path.stat)
-        file_size = file_stat.st_size
-
-        if file_size > self.config.max_file_size:
-            logger.debug(f"Skipping large file: {file_path} ({file_size} bytes)")
-            stats.files_skipped += 1
-            return
-
-        # Read file content
         try:
-            content = await loop.run_in_executor(
-                None, lambda: file_path.read_text(encoding="utf-8", errors="replace")
+            # Check file size
+            file_stat = await loop.run_in_executor(None, file_path.stat)
+            file_size = file_stat.st_size
+
+            if file_size > self.config.max_file_size:
+                logger.debug(f"Skipping large file: {file_path} ({file_size} bytes)")
+                return "skipped"
+
+            # Read file content
+            try:
+                content = await loop.run_in_executor(
+                    None, lambda: file_path.read_text(encoding="utf-8", errors="replace")
+                )
+            except Exception as e:
+                logger.warning(f"Failed to read {file_path}: {e}")
+                return "skipped"
+
+            # Skip empty files
+            if not content.strip():
+                return "skipped"
+
+            # Generate document ID and content hash
+            doc_id = f"file:{file_path}"
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+            # Check if update needed
+            if not force_reindex and doc_id in existing_docs:
+                if existing_docs[doc_id] == content_hash:
+                    return "skipped"
+
+            # Create embedding with proper query prefix for code search
+            import time
+            embed_start = time.time()
+            embedding = await self._create_embedding(
+                f"Represent this code for searching relevant code: {content}"
             )
+            embed_time = time.time() - embed_start
+            if embed_time > 1.0:
+                logger.debug(f"Embedding generation took {embed_time:.2f}s for {file_path.name}")
+
+            # Prepare document
+            doc = CodeDocument(
+                id=doc_id,
+                file_path=str(file_path),
+                content=content,
+                file_type=file_path.suffix[1:],  # Remove dot
+                file_size=file_size,
+                last_modified=datetime.fromtimestamp(file_stat.st_mtime),
+                indexed_at=datetime.now(),
+                content_hash=content_hash,
+                vector=embedding,
+            )
+
+            # Insert or update document
+            if doc_id in existing_docs:
+                # Update existing document by deleting and re-adding
+                await loop.run_in_executor(None, self.table.delete, f'id = "{doc_id}"')
+                await loop.run_in_executor(None, self.table.add, [doc.model_dump()])
+                return "updated"
+            else:
+                # Add new document
+                await loop.run_in_executor(None, self.table.add, [doc.model_dump()])
+                return "indexed"
+                
         except Exception as e:
-            logger.warning(f"Failed to read {file_path}: {e}")
-            stats.files_skipped += 1
-            return
-
-        # Skip empty files
-        if not content.strip():
-            stats.files_skipped += 1
-            return
-
-        # Generate document ID and content hash
-        doc_id = f"file:{file_path}"
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-
-        # Check if update needed
-        if not force_reindex and doc_id in existing_docs:
-            if existing_docs[doc_id] == content_hash:
-                stats.files_skipped += 1
-                return
-
-        # Create embedding with proper query prefix for code search
-        embedding = await self._create_embedding(
-            f"Represent this code for searching relevant code: {content}"
-        )
-
-        # Prepare document
-        doc = CodeDocument(
-            id=doc_id,
-            file_path=str(file_path),
-            content=content,
-            file_type=file_path.suffix[1:],  # Remove dot
-            file_size=file_size,
-            last_modified=datetime.fromtimestamp(file_stat.st_mtime),
-            indexed_at=datetime.now(),
-            content_hash=content_hash,
-            vector=embedding,
-        )
-
-        # Insert or update document
-        if doc_id in existing_docs:
-            # Update existing document by deleting and re-adding
-            await loop.run_in_executor(None, self.table.delete, f'id = "{doc_id}"')
-            await loop.run_in_executor(None, self.table.add, [doc.model_dump()])
-            stats.files_updated += 1
-        else:
-            # Add new document
-            await loop.run_in_executor(None, self.table.add, [doc.model_dump()])
-            stats.files_indexed += 1
-
-        stats.total_tokens_processed += len(content) // 4  # Rough estimate
+            logger.error(f"Error processing {file_path}: {e}")
+            return "error"
 
     async def _create_embedding(self, text: str):
         """Create embedding for text using the model."""
-        loop = asyncio.get_event_loop()
-        embedding = await loop.run_in_executor(
-            None, lambda: self.model.encode(text, show_progress_bar=False)
-        )
-        return embedding
+        # Limit concurrent embedding generation to avoid overwhelming the model
+        async with self._embedding_semaphore:
+            loop = asyncio.get_event_loop()
+            embedding = await loop.run_in_executor(
+                None, lambda: self.model.encode(text, show_progress_bar=False)
+            )
+            return embedding
 
     def _create_snippet(self, content: str, query: str, context_lines: int = 5) -> str:
         """Create a relevant snippet from the content."""

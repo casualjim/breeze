@@ -51,7 +51,9 @@ dependencies = [
     { name = "polars" },
     { name = "pyarrow" },
     { name = "pydantic" },
+    { name = "rich" },
     { name = "sentence-transformers" },
+    { name = "typer" },
     { name = "uvicorn" },
 ]
 
@@ -66,7 +68,9 @@ requires-dist = [
     { name = "polars" },
     { name = "pyarrow" },
     { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "rich", specifier = ">=14.0.0" },
     { name = "sentence-transformers", specifier = ">=4" },
+    { name = "typer", specifier = ">=0.16.0" },
     { name = "uvicorn" },
 ]
 

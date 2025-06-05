@@ -181,7 +181,7 @@ List contents of a directory to help identify what to index.
 Run the test script to verify functionality:
 
 ```bash
-python test_breeze.py
+uv run python test_breeze.py
 ```
 
 ## Deployment

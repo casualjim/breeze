@@ -14,7 +14,9 @@
       "Bash(uv run ruff:*)",
       "WebFetch(domain:gofastmcp.com)",
       "mcp__breeze__index_repository",
-      "mcp__breeze__search_code"
+      "mcp__breeze__search_code",
+      "Bash(uv run:*)",
+      "mcp__perplexity-server__get_documentation"
     ],
     "deny": []
   }

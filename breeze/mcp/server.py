@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,7 @@ async def get_engine() -> BreezeEngine:
     global engine
     async with engine_lock:
         if engine is None:
+            logger.info("Creating new BreezeEngine instance...")
             # Load configuration from environment
             config = BreezeConfig(
                 data_root=os.environ.get(
@@ -45,7 +47,13 @@ async def get_engine() -> BreezeEngine:
                 trust_remote_code=True,
             )
             engine = BreezeEngine(config)
-            await engine.initialize()
+            try:
+                await engine.initialize()
+                logger.info("BreezeEngine initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize BreezeEngine: {e}", exc_info=True)
+                engine = None
+                raise
         return engine
 
 
@@ -82,14 +90,77 @@ async def index_repository(
         if not valid_dirs:
             return {"status": "error", "message": "No valid directories provided"}
 
-        # Perform indexing
-        stats = await engine.index_directories(valid_dirs, force_reindex)
+        # For large directories, provide progress updates
+        logger.info(f"Starting indexing of {len(valid_dirs)} directories")
+        
+        # Create a background task for long-running indexing
+        # This allows the tool to return immediately while indexing continues
+        task_id = f"index_{datetime.now().timestamp()}"
+        
+        async def index_with_notifications():
+            try:
+                # Send start notification
+                await mcp.notification(
+                    method="indexing/started",
+                    params={
+                        "task_id": task_id,
+                        "directories": valid_dirs,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                
+                # Define progress callback
+                async def progress_callback(progress):
+                    await mcp.notification(
+                        method="indexing/progress",
+                        params={
+                            "task_id": task_id,
+                            "progress": progress,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
+                
+                # Perform the actual indexing with progress callback
+                stats = await engine.index_directories(
+                    valid_dirs, force_reindex, progress_callback
+                )
+                
+                # Send completion notification
+                await mcp.notification(
+                    method="indexing/completed", 
+                    params={
+                        "task_id": task_id,
+                        "statistics": stats.to_dict(),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                
+                return stats
+                
+            except Exception as e:
+                # Send error notification
+                await mcp.notification(
+                    method="indexing/error",
+                    params={
+                        "task_id": task_id,
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                raise
+        
+        # Run indexing and wait for completion
+        # In a production system, you might want to run this in background
+        # and return immediately with the task_id
+        stats = await index_with_notifications()
+        logger.info(f"Indexing completed: {stats.to_dict()}")
 
         return {
             "status": "success",
             "message": "Indexing completed successfully",
             "statistics": stats.to_dict(),
             "indexed_directories": valid_dirs,
+            "task_id": task_id,
         }
 
     except Exception as e:
@@ -230,6 +301,7 @@ def create_app():
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
     from starlette.responses import JSONResponse
+    from contextlib import asynccontextmanager
 
     async def health_endpoint(request):
         """Health check endpoint."""
@@ -250,15 +322,29 @@ def create_app():
     # Create ASGI apps for both transports
     sse_app = mcp.http_app(path="/", transport="sse")
     http_app = mcp.http_app(path="/", transport="streamable-http")
-
-    # Create Starlette app that mounts both
+    
+    @asynccontextmanager
+    async def combined_lifespan(app):
+        """Combined lifespan that initializes both MCP apps."""
+        # Initialize our engine
+        logger.info("Starting Breeze MCP server...")
+        await get_engine()
+        
+        # Initialize both MCP apps
+        async with sse_app.lifespan(app):
+            async with http_app.lifespan(app):
+                yield
+        
+        logger.info("Shutting down Breeze MCP server...")
+    
+    # Create Starlette app with combined lifespan
     app = Starlette(
         routes=[
             Mount("/sse", app=sse_app),
             Mount("/mcp", app=http_app),
             Route("/health", endpoint=health_endpoint, methods=["GET"]),
         ],
-        lifespan=http_app.lifespan,
+        lifespan=combined_lifespan,
     )
 
     return app

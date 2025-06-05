@@ -15,16 +15,19 @@ Breeze is an MCP (Model Context Protocol) server that supports streamable HTTP t
 ## Common Commands
 
 ### Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ### Run the application
+
 ```bash
 python main.py
 ```
 
 ### Run tests
+
 ```bash
 pytest
 ```
@@ -44,3 +47,12 @@ pytest
 
 - This project is in early development stage
 - Based on the windtools-mcp implementation but exploring LanceDB as an alternative approach
+
+## Development Workflow
+
+- Use uv commands in this project
+- Use the uv venv in this project
+
+## Guidelines for Modification
+
+DO NOT ADD FILES, MODIFY THE EXISTING ONES
