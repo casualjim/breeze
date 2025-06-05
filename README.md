@@ -187,12 +187,14 @@ python test_breeze.py
 ## Deployment
 
 ### Quick Start (Native - Recommended for Apple Silicon)
+
 ```bash
 # Install and run as a LaunchAgent (auto-starts on login)
 ./install-launchd.sh
 ```
 
 ### Docker (CPU-only)
+
 ```bash
 docker-compose up -d
 ```

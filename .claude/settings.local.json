@@ -12,7 +12,9 @@
       "mcp__zep__get_episodes",
       "mcp__perplexity-server__search",
       "Bash(uv run ruff:*)",
-      "WebFetch(domain:gofastmcp.com)"
+      "WebFetch(domain:gofastmcp.com)",
+      "mcp__breeze__index_repository",
+      "mcp__breeze__search_code"
     ],
     "deny": []
   }
