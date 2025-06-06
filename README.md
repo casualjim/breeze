@@ -10,6 +10,9 @@ A high-performance MCP (Model Context Protocol) server for semantic code search 
 - 🔄 **Async architecture** - Built with async/await for optimal performance
 - 🗄️ **Efficient data processing** - Uses Polars DataFrames and Arrow format
 - 🌐 **Cloud & Local Models** - Support for Voyage AI, Google Gemini, and local models
+- 🔍 **Intelligent Content Detection** - Automatically identifies code files using content analysis, not just extensions
+- 📂 **Project Management** - Register projects for automatic file watching and re-indexing on changes
+- ⏳ **Async Queue System** - Long-running indexing operations are queued and processed in the background
 
 ## Quick Start
 
@@ -158,7 +161,7 @@ The server exposes the following tools:
 
 ### `index_repository`
 
-Index code files from specified directories.
+Index code files from specified directories. This tool now queues an indexing task that runs asynchronously in the background, preventing timeouts for large repositories.
 
 **Parameters:**
 
@@ -177,7 +180,7 @@ Search for code semantically similar to a query.
 
 ### `get_index_stats`
 
-Get statistics about the current index.
+Get comprehensive statistics about the index and indexing queue.
 
 ### `list_directory`
 
@@ -186,6 +189,28 @@ List contents of a directory to help identify what to index.
 **Parameters:**
 
 - `directory_path` (str): Path to list
+
+### `register_project`
+
+Register a new project for automatic file watching and indexing. The system uses intelligent content detection to identify code files, not just file extensions.
+
+**Parameters:**
+
+- `name` (str): Project name
+- `paths` (List of strings): Directory paths to track
+- `auto_index` (bool): Whether to perform initial indexing (default: True)
+
+### `unregister_project`
+
+Stop watching and unregister a project.
+
+**Parameters:**
+
+- `project_id` (str): ID of the project to unregister
+
+### `list_projects`
+
+List all registered projects with their current status.
 
 ## Configuration
 
@@ -243,20 +268,60 @@ uv run python test_breeze.py
 
 ## Deployment
 
-### Quick Start (Native - Recommended for Apple Silicon)
+### Native macOS with MPS Acceleration (Recommended for Apple Silicon)
+
+For best performance on Apple Silicon Macs, run natively to access MPS hardware acceleration:
+
+#### Option 1: LaunchAgent (Auto-start)
 
 ```bash
-# Install and run as a LaunchAgent (auto-starts on login)
-./install-launchd.sh
+# Configure your settings
+cp .env.example .env
+# Edit .env with your settings (especially API keys for cloud models)
+
+# Install as a LaunchAgent
+python install-launchd.py
+
+# Check status
+launchctl list | grep breeze
+
+# View logs
+tail -f /usr/local/var/log/breeze-mcp.log
 ```
 
-### Docker (CPU-only)
+#### Option 2: Direct Execution
 
 ```bash
+# Run directly
+uv run python -m breeze serve
+
+# Or with custom settings
+BREEZE_PORT=8080 uv run python -m breeze serve
+```
+
+### Docker Deployment (CPU-only)
+
+Docker runs in a Linux VM on macOS and cannot access MPS. Use for Linux servers or CI/CD:
+
+```bash
+# Using docker-compose
 docker-compose up -d
+
+# Or using docker directly
+docker build -t breeze-mcp .
+docker run -d \
+  -p 9483:9483 \
+  -v breeze-data:/data \
+  -e BREEZE_HOST=0.0.0.0 \
+  breeze-mcp
 ```
 
-See [README-DEPLOYMENT.md](README-DEPLOYMENT.md) for detailed deployment options and performance considerations.
+### Performance Comparison
+
+| Method | Hardware Acceleration | Embedding Speed |
+|--------|----------------------|----------------|
+| Native macOS | MPS (Metal) | ~10x faster on Apple Silicon |
+| Docker | CPU only | Baseline speed |
 
 ## Architecture
 
@@ -274,6 +339,44 @@ See [README-DEPLOYMENT.md](README-DEPLOYMENT.md) for detailed deployment options
 - Polars for efficient data processing
 - Pydantic v2 models with proper type annotations
 - CodeRankEmbed model specifically designed for code search
+
+## CLAUDE.md Example
+
+To encourage Claude to use Breeze for finding code instead of built-in tools, add this to your project's CLAUDE.md:
+
+```markdown
+# Code Search Instructions
+
+This project has a Breeze MCP server configured for fast semantic code search. 
+
+## When searching for code:
+
+1. **Use Breeze first**: Always use the `search_code` tool from the Breeze MCP server before using other search methods
+2. **Semantic queries work best**: Instead of searching for exact function names, describe what the code does
+3. **Check index status**: Use `get_index_stats` to see how many files are indexed
+4. **Register projects**: For ongoing work, use `register_project` to enable automatic re-indexing on file changes
+
+## Examples:
+
+- Instead of: "find handleClick function"
+- Use: "search_code" with query "click event handler"
+
+- Instead of: grep or file searching
+- Use: "search_code" with descriptive queries like "authentication logic" or "database connection setup"
+
+## Project Registration:
+
+If working on this codebase long-term:
+```
+register_project(
+    name="MyProject",
+    paths=["/path/to/project"],
+    auto_index=true
+)
+```
+
+This enables automatic re-indexing when files change, keeping search results current.
+```
 
 ## License
 

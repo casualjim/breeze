@@ -296,6 +296,9 @@ async def register_project(
     2. Optionally perform initial indexing
     3. Start watching for file changes
     
+    The system automatically detects code files using content analysis rather than
+    file extensions, ensuring all relevant code is indexed.
+    
     Args:
         name: Name of the project
         paths: List of directory paths to track

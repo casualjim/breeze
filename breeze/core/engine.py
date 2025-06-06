@@ -352,9 +352,16 @@ class BreezeEngine:
         if task.status == "failed":
             raise Exception(f"Indexing failed: {task.error_message}")
         
-        # Convert result_stats dict back to IndexStats
-        if task.result_stats:
-            return IndexStats(**task.result_stats)
+        # Reconstruct IndexStats from task fields
+        if task.result_files_scanned is not None:
+            return IndexStats(
+                files_scanned=task.result_files_scanned,
+                files_indexed=task.result_files_indexed or 0,
+                files_updated=task.result_files_updated or 0,
+                files_skipped=task.result_files_skipped or 0,
+                errors=task.result_errors or 0,
+                total_tokens_processed=task.result_total_tokens_processed or 0
+            )
         
         # Fallback if no stats recorded
         return IndexStats()
@@ -944,8 +951,7 @@ class BreezeEngine:
         project = Project(
             name=name,
             paths=normalized_paths,
-            file_extensions=file_extensions
-            or [ext.lstrip(".") for ext in self.config.code_extensions],
+            file_extensions=file_extensions,  # Keep for backward compatibility
             exclude_patterns=exclude_patterns or self.config.exclude_patterns,
             auto_index=auto_index,
         )
@@ -1042,6 +1048,9 @@ class BreezeEngine:
         try:
             # Create file watcher
             watcher = FileWatcher(self, project, event_callback)
+            # Set the current event loop for thread-safe operations
+            watcher.set_event_loop(asyncio.get_running_loop())
+            
             observer = Observer()
 
             # Add all project paths to observer
@@ -1057,7 +1066,16 @@ class BreezeEngine:
 
             # Update project watching status
             project.is_watching = True
-            await self.update_project_indexed_time(project_id)
+            project.last_indexed = datetime.now()
+            project.updated_at = datetime.now()
+            
+            # Update in database
+            await (
+                self.projects_table.merge_insert("id")
+                .when_matched_update_all()
+                .when_not_matched_insert_all()
+                .execute([project])
+            )
 
             logger.info(f"Started watching project '{project.name}' ({project_id})")
 
@@ -1097,7 +1115,15 @@ class BreezeEngine:
             project = await self.get_project(project_id)
             if project:
                 project.is_watching = False
-                await self.update_project_indexed_time(project_id)
+                project.updated_at = datetime.now()
+                
+                # Update in database
+                await (
+                    self.projects_table.merge_insert("id")
+                    .when_matched_update_all()
+                    .when_not_matched_insert_all()
+                    .execute([project])
+                )
 
             logger.info(f"Stopped watching project {project_id}")
             return True
@@ -1200,17 +1226,40 @@ class BreezeEngine:
             )
             logger.info("Created new indexing tasks table")
         else:
+            # Open existing table
             self.indexing_tasks_table = await self.db.open_table(table_name)
-            # Reset any running tasks to queued (they were interrupted)
-            await self._reset_interrupted_tasks()
+            
+            # Check if schema needs migration by trying to query
+            try:
+                # Try to access new fields - this will fail if schema is old
+                test_results = await self.indexing_tasks_table.query().limit(1).to_list()
+                if test_results and 'result_files_scanned' not in test_results[0]:
+                    logger.warning("Detected old indexing_tasks schema, recreating table")
+                    # Drop and recreate with new schema
+                    await self.db.drop_table(table_name)
+                    self.indexing_tasks_table = await self.db.create_table(
+                        table_name,
+                        None,  # data
+                        schema=IndexingTask,  # schema
+                        mode="overwrite",  # mode
+                    )
+                    logger.info("Recreated indexing tasks table with new schema")
+                else:
+                    # Reset any running tasks to queued (they were interrupted)
+                    await self._reset_interrupted_tasks()
+            except Exception as e:
+                logger.warning(f"Schema check failed: {e}, keeping existing table")
+                # Reset any running tasks to queued (they were interrupted)
+                await self._reset_interrupted_tasks()
 
     async def _reset_interrupted_tasks(self):
         """Reset running tasks to queued status on startup."""
         try:
             # Update running tasks to queued
+            # LanceDB update syntax: update(values, where)
             await self.indexing_tasks_table.update(
-                where="status = 'running'",
-                values={"status": "queued"}
+                {"status": "queued"},
+                where="status = 'running'"
             )
         except Exception as e:
             logger.warning(f"Error resetting interrupted tasks: {e}")
@@ -1240,9 +1289,10 @@ class BreezeEngine:
     async def update_indexing_task(self, task: IndexingTask) -> None:
         """Update an indexing task in the database."""
         try:
+            # LanceDB update syntax: update(values, where)
             await self.indexing_tasks_table.update(
-                where=f"task_id = '{task.task_id}'",
-                values=task.model_dump()
+                task.model_dump(),
+                where=f"task_id = '{task.task_id}'"
             )
         except Exception as e:
             logger.error(f"Error updating indexing task: {e}")
@@ -1546,22 +1596,17 @@ class FileWatcher(FileSystemEventHandler):
         self.last_event_time = 0
         self._processing = False
         self._task = None
+        self._loop = None  # Store the event loop
+        self._thread_safe_queue = asyncio.Queue()
+
+    def set_event_loop(self, loop):
+        """Set the event loop to use for async operations."""
+        self._loop = loop
 
     def _is_code_file(self, path: Path) -> bool:
         """Check if file should be indexed."""
-        # Check extension
-        if path.suffix.lower() not in [
-            f".{ext}" for ext in self.project.file_extensions
-        ]:
-            return False
-
-        # Check exclude patterns
-        path_str = str(path)
-        for pattern in self.project.exclude_patterns:
-            if pattern in path_str:
-                return False
-
-        return True
+        # Use the engine's content detection method
+        return self.engine._should_index_file(path)
 
     def on_any_event(self, event: FileSystemEvent):
         """Handle any file system event."""
@@ -1578,10 +1623,18 @@ class FileWatcher(FileSystemEventHandler):
         self.pending_files.add(path)
         self.last_event_time = time.time()
 
-        # Start or restart the debounce timer
-        if self._task:
+        # Schedule the debounce timer in the main event loop
+        if self._loop:
+            # Thread-safe way to schedule coroutine in the main loop
+            asyncio.run_coroutine_threadsafe(self._schedule_processing(), self._loop)
+    
+    async def _schedule_processing(self):
+        """Schedule processing after debounce (runs in main event loop)."""
+        # Cancel existing task if any
+        if self._task and not self._task.done():
             self._task.cancel()
-
+        
+        # Create new task
         self._task = asyncio.create_task(self._process_after_debounce())
 
     async def _process_after_debounce(self):

@@ -1,7 +1,7 @@
 """Data models for Breeze code indexing using Pydantic v2."""
 
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -89,7 +89,7 @@ class Project(LanceModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now())
     last_indexed: Optional[datetime] = Field(default=None, description="Last indexing time")
     is_watching: bool = Field(default=False, description="Whether file watching is active")
-    file_extensions: List[str] = Field(default_factory=list, description="File extensions to index")
+    file_extensions: Optional[List[str]] = Field(default=None, description="Deprecated - content detection is now automatic")
     exclude_patterns: List[str] = Field(default_factory=list, description="Patterns to exclude")
     auto_index: bool = Field(default=True, description="Auto-index on file changes")
 
@@ -114,8 +114,13 @@ class IndexingTask(LanceModel):
     started_at: Optional[datetime] = Field(default=None, description="When task started executing")
     completed_at: Optional[datetime] = Field(default=None, description="When task finished")
     
-    # Results
-    result_stats: Optional[Dict[str, Any]] = Field(default=None, description="IndexStats as dict when completed")
+    # Results - proper fields for IndexStats
+    result_files_scanned: Optional[int] = Field(default=None)
+    result_files_indexed: Optional[int] = Field(default=None)
+    result_files_updated: Optional[int] = Field(default=None)
+    result_files_skipped: Optional[int] = Field(default=None)
+    result_errors: Optional[int] = Field(default=None)
+    result_total_tokens_processed: Optional[int] = Field(default=None)
     error_message: Optional[str] = Field(default=None, description="Error message if failed")
     
     # Queue management

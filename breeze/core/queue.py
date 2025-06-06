@@ -145,7 +145,13 @@ class IndexingQueue:
             task.status = "completed"
             task.completed_at = datetime.now()
             task.progress = 100.0
-            task.result_stats = stats.model_dump()
+            # Store IndexStats fields directly
+            task.result_files_scanned = stats.files_scanned
+            task.result_files_indexed = stats.files_indexed
+            task.result_files_updated = stats.files_updated
+            task.result_files_skipped = stats.files_skipped
+            task.result_errors = stats.errors
+            task.result_total_tokens_processed = stats.total_tokens_processed
             await self.engine.update_indexing_task(task)
             
             logger.info(f"Task {task.task_id} completed successfully")
