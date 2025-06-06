@@ -36,7 +36,7 @@ async def test_rate_limit_fix():
             print(f"  -> Rate limited! (attempt {call_count-1} for batch 2)")
             raise Exception("429 Too Many Requests")
         
-        print(f"  -> Success!")
+        print("  -> Success!")
         return np.random.rand(len(batch), 768)
     
     model.compute_source_embeddings = mock_compute
@@ -55,7 +55,7 @@ async def test_rate_limit_fix():
         requests_per_minute=1000,
     )
     
-    print(f"\n=== Results ===")
+    print("\n=== Results ===")
     print(f"Total texts: {len(texts)}")
     print(f"Embeddings returned: {len(result['embeddings'])}")
     print(f"Successful batches: {result['successful_batches']}")
@@ -69,7 +69,7 @@ async def test_rate_limit_fix():
     assert len(result['embeddings']) < len(texts), "Should have partial results"
     
     print(f"\n✅ Fix verified: Got {len(result['embeddings'])} embeddings out of {len(texts)} texts")
-    print(f"   Failed batches will be retried by background task")
+    print("   Failed batches will be retried by background task")
     
 
 if __name__ == "__main__":

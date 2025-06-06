@@ -2,11 +2,11 @@
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-import uuid
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 from lancedb.pydantic import LanceModel, Vector
+import uuid_utils as uuid
 
 
 class RetryStatus(str, Enum):
@@ -23,7 +23,7 @@ class FailedBatch(LanceModel):
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = Field(default_factory=lambda: str(uuid.uuid7()))
     batch_id: str = Field(description="Unique identifier for this batch")
     file_paths: List[str] = Field(description="List of file paths in this batch")
     content_hashes: List[str] = Field(description="Content hashes for deduplication")
@@ -99,7 +99,7 @@ class IndexingTask(LanceModel):
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
-    task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    task_id: str = Field(default_factory=lambda: str(uuid.uuid7()))
     paths: List[str] = Field(description="Directories to index")
     force_reindex: bool = Field(default=False, description="Force reindexing of all files")
     status: str = Field(default="queued", description="Status: queued, running, completed, failed")
@@ -148,6 +148,6 @@ def get_code_document_schema(embedding_model):
         last_modified: datetime = Field(description="Last modification time of the file")
         indexed_at: datetime = Field(description="Time when the file was indexed")
         content_hash: str = Field(description="SHA256 hash of the file content")
-        vector: Vector(embedding_model.ndims()) = embedding_model.VectorField(default=None)
+        vector: Vector(embedding_model.ndims()) = embedding_model.VectorField(default=None)  # type: ignore
     
     return CodeDocumentWithEmbedding

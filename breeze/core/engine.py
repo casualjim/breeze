@@ -47,6 +47,7 @@ from breeze.core.models import (
     get_code_document_schema,
 )
 from breeze.core.embeddings import get_voyage_embeddings_with_limits
+from breeze.core.queue import IndexingQueue
 
 # Use standard Python logging to avoid duplicate handlers
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ class BreezeEngine:
         self.table: Optional[lancedb.Table] = None
         self.projects_table: Optional[lancedb.Table] = None
         self.failed_batches_table: Optional[lancedb.Table] = None
+        self.indexing_tasks_table: Optional[lancedb.Table] = None
         self.embedding_model = None
         self.document_schema = None
         self._initialized = False
@@ -84,6 +86,9 @@ class BreezeEngine:
         # Background retry task
         self._retry_task = None
         self._retry_task_stop_event = asyncio.Event()
+        
+        # Indexing queue
+        self._indexing_queue: Optional[IndexingQueue] = None
 
     async def initialize(self):
         """Initialize the database and embedding model."""
@@ -225,8 +230,16 @@ class BreezeEngine:
             # Initialize failed batches table
             await self._init_failed_batches_table()
 
+            # Initialize indexing tasks table
+            await self.init_indexing_tasks_table()
+
             # Start background retry task
             self._retry_task = asyncio.create_task(self._background_retry_task())
+
+            # Initialize and start indexing queue
+            self._indexing_queue = IndexingQueue(self)
+            await self._indexing_queue.restore_from_database()
+            await self._indexing_queue.start()
 
             self._initialized = True
             logger.info("BreezeEngine initialization complete")
@@ -302,6 +315,50 @@ class BreezeEngine:
 
         return stats
 
+    async def index_directories_sync(
+        self,
+        directories: List[str],
+        force_reindex: bool = False,
+        progress_callback: Optional[Callable] = None,
+    ) -> IndexStats:
+        """
+        Synchronous wrapper for indexing that works with the queue system.
+        
+        This method creates a task, queues it, and waits for completion,
+        making it appear synchronous to the CLI while using the queue internally.
+        """
+        await self.initialize()
+        
+        # Create indexing task
+        task = IndexingTask(
+            paths=directories,
+            force_reindex=force_reindex
+        )
+        
+        # Add task to queue with progress callback
+        await self._indexing_queue.add_task(task, progress_callback)
+        
+        # Poll until complete
+        while task.status not in ["completed", "failed"]:
+            # Refresh task from database
+            task = await self.get_indexing_task_db(task.task_id)
+            if not task:
+                raise Exception(f"Task {task.task_id} disappeared from database")
+            
+            # Brief sleep to avoid hammering the database
+            await asyncio.sleep(0.1)
+        
+        # Return results or raise error
+        if task.status == "failed":
+            raise Exception(f"Indexing failed: {task.error_message}")
+        
+        # Convert result_stats dict back to IndexStats
+        if task.result_stats:
+            return IndexStats(**task.result_stats)
+        
+        # Fallback if no stats recorded
+        return IndexStats()
+
     async def search(
         self,
         query: str,
@@ -363,6 +420,11 @@ class BreezeEngine:
 
         # Get failed batch stats
         failed_stats = await self._get_failed_batch_stats()
+        
+        # Get queue stats if available
+        queue_stats = {}
+        if self._indexing_queue:
+            queue_stats = await self._indexing_queue.get_queue_status()
 
         return {
             "total_documents": table_len,
@@ -370,6 +432,7 @@ class BreezeEngine:
             "model": self.config.embedding_model,
             "database_path": self.config.get_db_path(),
             "failed_batches": failed_stats,
+            "indexing_queue": queue_stats,
         }
 
     async def _get_failed_batch_stats(self) -> Dict:
@@ -1120,6 +1183,84 @@ class BreezeEngine:
         """List all indexing tasks."""
         return list(self._active_tasks.values())
 
+    # Indexing Task Persistence Methods
+
+    async def init_indexing_tasks_table(self):
+        """Initialize the indexing tasks table."""
+        table_name = "indexing_tasks"
+        existing_tables = await self.db.table_names()
+
+        if table_name not in existing_tables:
+            # Create new table
+            self.indexing_tasks_table = await self.db.create_table(
+                table_name,
+                None,  # data
+                schema=IndexingTask,  # schema
+                mode="overwrite",  # mode
+            )
+            logger.info("Created new indexing tasks table")
+        else:
+            self.indexing_tasks_table = await self.db.open_table(table_name)
+            # Reset any running tasks to queued (they were interrupted)
+            await self._reset_interrupted_tasks()
+
+    async def _reset_interrupted_tasks(self):
+        """Reset running tasks to queued status on startup."""
+        try:
+            # Update running tasks to queued
+            await self.indexing_tasks_table.update(
+                where="status = 'running'",
+                values={"status": "queued"}
+            )
+        except Exception as e:
+            logger.warning(f"Error resetting interrupted tasks: {e}")
+
+    async def save_indexing_task(self, task: IndexingTask) -> None:
+        """Save an indexing task to the database."""
+        await self.indexing_tasks_table.add([task])
+
+    async def get_indexing_task_db(self, task_id: str) -> Optional[IndexingTask]:
+        """Get an indexing task from the database."""
+        try:
+            results = await (
+                self.indexing_tasks_table.query()
+                .where(f"task_id = '{task_id}'")
+                .limit(1)
+                .to_list()
+            )
+            
+            if not results:
+                return None
+            
+            return IndexingTask(**results[0])
+        except Exception as e:
+            logger.error(f"Error getting indexing task: {e}")
+            return None
+
+    async def update_indexing_task(self, task: IndexingTask) -> None:
+        """Update an indexing task in the database."""
+        try:
+            await self.indexing_tasks_table.update(
+                where=f"task_id = '{task.task_id}'",
+                values=task.model_dump()
+            )
+        except Exception as e:
+            logger.error(f"Error updating indexing task: {e}")
+
+    async def list_tasks_by_status(self, status: str) -> List[IndexingTask]:
+        """List all tasks with a specific status."""
+        try:
+            results = await (
+                self.indexing_tasks_table.query()
+                .where(f"status = '{status}'")
+                .to_list()
+            )
+            
+            return [IndexingTask(**result) for result in results]
+        except Exception as e:
+            logger.error(f"Error listing tasks by status: {e}")
+            return []
+
     # Failed Batch Management Methods
 
     async def _init_failed_batches_table(self):
@@ -1369,6 +1510,10 @@ class BreezeEngine:
 
     async def shutdown(self):
         """Shutdown the engine and cleanup resources."""
+        # Stop indexing queue
+        if self._indexing_queue:
+            await self._indexing_queue.stop()
+        
         # Stop background retry task
         if self._retry_task:
             self._retry_task_stop_event.set()

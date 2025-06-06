@@ -2,7 +2,7 @@
 
 import asyncio
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import numpy as np
 
 from breeze.core.engine import BreezeEngine
@@ -124,7 +124,7 @@ async def test_already_indexed_files_skip_embedding():
         await engine.init_tables()
         stats1 = await engine.index_directory(tmpdir, force_reindex=False)
         
-        print(f"\nFirst indexing:")
+        print("\nFirst indexing:")
         print(f"Files indexed: {stats1.files_indexed}")
         print(f"Embedding calls: {len(embedding_calls)}")
         
@@ -134,7 +134,7 @@ async def test_already_indexed_files_skip_embedding():
         # Second indexing without changes
         stats2 = await engine.index_directory(tmpdir, force_reindex=False)
         
-        print(f"\nSecond indexing (no changes):")
+        print("\nSecond indexing (no changes):")
         print(f"Files skipped: {stats2.files_skipped}")
         print(f"Embedding calls: {len(embedding_calls)}")
         

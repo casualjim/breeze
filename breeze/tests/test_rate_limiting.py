@@ -1,9 +1,7 @@
 """Tests for rate limiting functionality in embeddings."""
 
-import asyncio
 import time
-import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 import numpy as np
 import pytest
 

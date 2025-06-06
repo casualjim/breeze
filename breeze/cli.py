@@ -252,7 +252,7 @@ def index(
                     )
 
             # Run indexing with simple logging
-            stats = await engine.index_directories(
+            stats = await engine.index_directories_sync(
                 dir_strings, force, simple_progress_callback
             )
 
@@ -405,7 +405,7 @@ def index(
                     update_display()
 
                     # Run indexing with the layout callback
-                    stats = await engine.index_directories(
+                    stats = await engine.index_directories_sync(
                         dir_strings, force, progress_callback_with_layout
                     )
 

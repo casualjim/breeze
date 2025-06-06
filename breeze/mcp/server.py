@@ -1,7 +1,6 @@
 """MCP server implementation for Breeze code indexing."""
 
 import asyncio
-import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +10,7 @@ from fastmcp import FastMCP
 from fastmcp.utilities.logging import get_logger
 
 from breeze.core import BreezeEngine, BreezeConfig
+from breeze.core.models import IndexingTask
 
 # Use FastMCP's logging utility for consistent formatting
 logger = get_logger("breeze.server")
@@ -70,18 +70,19 @@ async def index_repository(
     """
     Index code files from specified directories into the semantic search database.
 
-    This tool scans the specified directories for code files and indexes their content
-    using advanced embedding models for high-quality semantic search.
+    This tool queues an indexing task that scans the specified directories for code files 
+    and indexes their content using advanced embedding models for high-quality semantic search.
+    The task runs asynchronously in the background and returns immediately with a task ID.
 
     Args:
         directories: List of absolute paths to directories to index
         force_reindex: If true, will reindex all files even if they already exist in the index
 
     Returns:
-        Statistics about the indexing operation including files indexed, updated, and skipped
+        Task information including task_id and queue position
     """
     try:
-        logger.info(f"Indexing directories: {directories}")
+        logger.info(f"Queueing indexing for directories: {directories}")
         engine = await get_engine()
 
         # Validate directories
@@ -96,85 +97,57 @@ async def index_repository(
         if not valid_dirs:
             return {"status": "error", "message": "No valid directories provided"}
 
-        # For large directories, provide progress updates
-        logger.info(f"Starting indexing of {len(valid_dirs)} directories")
+        # Create indexing task
+        task = IndexingTask(
+            paths=valid_dirs,
+            force_reindex=force_reindex
+        )
         
-        # Create a background task for long-running indexing
-        # This allows the tool to return immediately while indexing continues
-        task_id = f"index_{datetime.now().timestamp()}"
-        
-        async def index_with_notifications():
-            try:
-                # Send start notification if supported
-                if hasattr(mcp, 'notification'):
-                    await mcp.notification(
-                        method="indexing/started",
-                        params={
-                            "task_id": task_id,
-                            "directories": valid_dirs,
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    )
-                
-                # Define progress callback
-                async def progress_callback(progress):
-                    if hasattr(mcp, 'notification'):
-                        await mcp.notification(
-                            method="indexing/progress",
-                            params={
-                                "task_id": task_id,
-                                "progress": progress,
-                                "timestamp": datetime.now().isoformat(),
-                            }
-                        )
-                
-                # Perform the actual indexing with progress callback
-                stats = await engine.index_directories(
-                    valid_dirs, force_reindex, progress_callback
+        # Define progress callback for notifications
+        async def progress_callback(stats):
+            if hasattr(mcp, 'notification'):
+                await mcp.notification(
+                    method="indexing/progress",
+                    params={
+                        "task_id": task.task_id,
+                        "progress": {
+                            "files_scanned": stats.files_scanned,
+                            "files_indexed": stats.files_indexed,
+                            "files_updated": stats.files_updated,
+                            "files_skipped": stats.files_skipped,
+                            "errors": stats.errors,
+                        },
+                        "timestamp": datetime.now().isoformat(),
+                    }
                 )
-                
-                # Send completion notification
-                if hasattr(mcp, 'notification'):
-                    await mcp.notification(
-                        method="indexing/completed", 
-                        params={
-                            "task_id": task_id,
-                            "statistics": stats.model_dump(),
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    )
-                
-                return stats
-                
-            except Exception as e:
-                # Send error notification
-                if hasattr(mcp, 'notification'):
-                    await mcp.notification(
-                        method="indexing/error",
-                        params={
-                            "task_id": task_id,
-                            "error": str(e),
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    )
-                raise
         
-        # Run indexing and wait for completion
-        # In a production system, you might want to run this in background
-        # and return immediately with the task_id
-        stats = await index_with_notifications()
-        logger.info(f"Indexing completed: {stats.model_dump()}")
+        # Add task to queue
+        queue_position = await engine._indexing_queue.add_task(task, progress_callback)
+        
+        # Send queued notification
+        if hasattr(mcp, 'notification'):
+            await mcp.notification(
+                method="indexing/queued",
+                params={
+                    "task_id": task.task_id,
+                    "directories": valid_dirs,
+                    "queue_position": queue_position,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+        
+        logger.info(f"Indexing task {task.task_id} queued at position {queue_position}")
 
         return {
             "status": "success",
-            "message": "Indexing completed successfully",
-            "statistics": stats.model_dump(),
+            "message": "Indexing task queued successfully",
+            "task_id": task.task_id,
+            "queue_position": queue_position,
             "indexed_directories": valid_dirs,
-            "task_id": task_id,
         }
 
     except Exception as e:
-        logger.error(f"Error during indexing: {e}")
+        logger.error(f"Error queueing indexing task: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -226,13 +199,17 @@ async def search_code(
 @mcp.tool()
 async def get_index_stats() -> Dict[str, Any]:
     """
-    Get statistics about the current code index.
+    Get comprehensive statistics about the code index and indexing queue.
 
-    Returns information about the number of indexed documents, the embedding model
-    being used, and the database location.
+    Returns information about:
+    - Number of indexed documents
+    - Embedding model being used
+    - Database location
+    - Failed batch statistics
+    - Indexing queue status (queue size, current task, queued tasks)
 
     Returns:
-        Dictionary containing index statistics
+        Dictionary containing index and queue statistics
     """
     try:
         engine = await get_engine()

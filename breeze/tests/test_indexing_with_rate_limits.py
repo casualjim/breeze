@@ -91,7 +91,7 @@ async def test_indexing_continues_with_rate_limits():
                 concurrent_writers=2,
             )
             
-            print(f"\nIndexing Statistics:")
+            print("\nIndexing Statistics:")
             print(f"Files scanned: {stats.files_scanned}")
             print(f"Files indexed: {stats.files_indexed}")
             print(f"Files updated: {stats.files_updated}")
