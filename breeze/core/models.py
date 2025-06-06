@@ -94,19 +94,36 @@ class Project(LanceModel):
     auto_index: bool = Field(default=True, description="Auto-index on file changes")
 
 
-class IndexingTask(BaseModel):
-    """Represents an active indexing task."""
+class IndexingTask(LanceModel):
+    """Represents an indexing task with full persistence support."""
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    project_id: Optional[str] = Field(default=None)
-    paths: List[str]
-    started_at: datetime = Field(default_factory=lambda: datetime.now())
-    completed_at: Optional[datetime] = None
-    status: str = Field(default="pending")  # pending, running, completed, failed
-    progress: float = Field(default=0.0)
-    total_files: int = Field(default=0)
-    processed_files: int = Field(default=0)
-    error_message: Optional[str] = None
+    paths: List[str] = Field(description="Directories to index")
+    force_reindex: bool = Field(default=False, description="Force reindexing of all files")
+    status: str = Field(default="queued", description="Status: queued, running, completed, failed")
+    
+    # Progress tracking
+    progress: float = Field(default=0.0, description="Progress percentage (0-100)")
+    total_files: int = Field(default=0, description="Total number of files to process")
+    processed_files: int = Field(default=0, description="Number of files processed")
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=lambda: datetime.now())
+    started_at: Optional[datetime] = Field(default=None, description="When task started executing")
+    completed_at: Optional[datetime] = Field(default=None, description="When task finished")
+    
+    # Results
+    result_stats: Optional[Dict[str, Any]] = Field(default=None, description="IndexStats as dict when completed")
+    error_message: Optional[str] = Field(default=None, description="Error message if failed")
+    
+    # Queue management
+    queue_position: Optional[int] = Field(default=None, description="Position in queue (0 = next)")
+    attempt_count: int = Field(default=0, description="Number of execution attempts")
+    
+    # Optional project association
+    project_id: Optional[str] = Field(default=None, description="Associated project if any")
     
 
 def get_code_document_schema(embedding_model):

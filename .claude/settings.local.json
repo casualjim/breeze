@@ -21,7 +21,11 @@
       "Bash(rg:*)",
       "mcp__code-index__set_project_path",
       "mcp__code-index__search_code",
-      "mcp__code-index__get_file_summary"
+      "mcp__code-index__get_file_summary",
+      "mcp__breeze__get_index_stats",
+      "mcp__docs-mcp__list_doc_sources",
+      "mcp__docs-mcp__fetch_docs",
+      "mcp__breeze__register_project"
     ],
     "deny": []
   }
