@@ -36,4 +36,4 @@ dependencies = [
 breeze = "breeze.cli:main"
 
 [dependency-groups]
-dev = ["ruff>=0.11.12"]
+dev = ["ruff>=0.11.12", "pytest>=8.0.0", "pytest-asyncio>=0.23.0"]

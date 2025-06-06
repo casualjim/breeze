@@ -592,37 +592,70 @@ class BreezeEngine:
                                 if self.is_voyage_model:
                                     # Special handling for Voyage with token limits
                                     rate_limits = self.config.get_voyage_rate_limits()
-                                    embeddings = (
-                                        await get_voyage_embeddings_with_limits(
-                                            contents,
-                                            self.embedding_model,
-                                            self.tokenizer,
-                                            self.config.voyage_concurrent_requests,
-                                            self.config.voyage_max_retries,
-                                            self.config.voyage_retry_base_delay,
-                                            rate_limits['tokens_per_minute'],
-                                            rate_limits['requests_per_minute'],
-                                        )
+                                    result = await get_voyage_embeddings_with_limits(
+                                        contents,
+                                        self.embedding_model,
+                                        self.tokenizer,
+                                        self.config.voyage_concurrent_requests,
+                                        self.config.voyage_max_retries,
+                                        self.config.voyage_retry_base_delay,
+                                        rate_limits['tokens_per_minute'],
+                                        rate_limits['requests_per_minute'],
                                     )
+                                    
+                                    embeddings = result['embeddings']
+                                    
+                                    # Handle any failed batches
+                                    if result['failed_batches']:
+                                        # Find which documents failed
+                                        failed_indices = []
+                                        for failed_batch_idx in result['failed_batches']:
+                                            batch = result['safe_batches'][failed_batch_idx]
+                                            # Find original indices of texts in the failed batch
+                                            start_idx = sum(len(result['safe_batches'][i]) for i in range(failed_batch_idx))
+                                            for i in range(len(batch)):
+                                                failed_indices.append(start_idx + i)
+                                        
+                                        # Separate successful and failed documents
+                                        successful_doc_datas = [doc for i, doc in enumerate(doc_datas) if i not in failed_indices]
+                                        failed_doc_datas = [doc for i, doc in enumerate(doc_datas) if i in failed_indices]
+                                        
+                                        # Store failed documents for retry
+                                        if failed_doc_datas:
+                                            batch_id = f"batch_{batch_idx}_voyage_retry_{int(time.time())}"
+                                            file_paths = [doc["file_path"] for doc in failed_doc_datas]
+                                            content_hashes = [doc["content_hash"] for doc in failed_doc_datas]
+                                            
+                                            await self._store_failed_batch(
+                                                batch_id=batch_id,
+                                                file_paths=file_paths,
+                                                content_hashes=content_hashes,
+                                                error_message="Rate limit exceeded - will retry",
+                                            )
+                                            
+                                            logger.info(f"Stored {len(failed_doc_datas)} documents for later retry due to rate limits")
+                                        
+                                        # Continue with successful documents only
+                                        doc_datas = successful_doc_datas
                                 else:
                                     # Standard embedding generation
-                                    embeddings = (
-                                        self.embedding_model.compute_source_embeddings(
-                                            contents
-                                        )
-                                    )
+                                    embeddings = self.embedding_model.compute_source_embeddings(contents)
 
                                 # Create document objects with embeddings
                                 documents = []
-                                for doc_data, embedding in zip(doc_datas, embeddings):
-                                    doc_data["vector"] = (
-                                        embedding.tolist()
-                                        if hasattr(embedding, "tolist")
-                                        else embedding
-                                    )
-                                    documents.append(self.document_schema(**doc_data))
+                                if len(embeddings) > 0:
+                                    for doc_data, embedding in zip(doc_datas, embeddings):
+                                        doc_data["vector"] = (
+                                            embedding.tolist()
+                                            if hasattr(embedding, "tolist")
+                                            else embedding
+                                        )
+                                        documents.append(self.document_schema(**doc_data))
 
-                                await write_queue.put((batch_idx, documents, doc_datas))
+                                    await write_queue.put((batch_idx, documents, doc_datas))
+                                else:
+                                    # No successful embeddings - all failed
+                                    logger.warning(f"Batch {batch_idx}: All embeddings failed, will retry later")
                             except Exception as e:
                                 logger.error(
                                     f"Failed to generate embeddings for batch {batch_idx}: {e}"
@@ -1264,23 +1297,25 @@ class BreezeEngine:
 
                                 if self.is_voyage_model:
                                     rate_limits = self.config.get_voyage_rate_limits()
-                                    embeddings = (
-                                        await get_voyage_embeddings_with_limits(
-                                            contents,
-                                            self.embedding_model,
-                                            self.tokenizer,
-                                            self.config.voyage_concurrent_requests,
-                                            self.config.voyage_max_retries,
-                                            self.config.voyage_retry_base_delay,
-                                            rate_limits['tokens_per_minute'],
-                                            rate_limits['requests_per_minute'],
-                                        )
+                                    result = await get_voyage_embeddings_with_limits(
+                                        contents,
+                                        self.embedding_model,
+                                        self.tokenizer,
+                                        self.config.voyage_concurrent_requests,
+                                        self.config.voyage_max_retries,
+                                        self.config.voyage_retry_base_delay,
+                                        rate_limits['tokens_per_minute'],
+                                        rate_limits['requests_per_minute'],
                                     )
+                                    
+                                    embeddings = result['embeddings']
+                                    
+                                    # If some batches failed, mark this batch for retry again
+                                    if result['failed_batches']:
+                                        raise Exception("Some embeddings failed - retry later")
                                 else:
-                                    embeddings = (
-                                        self.embedding_model.compute_source_embeddings(
-                                            contents
-                                        )
+                                    embeddings = self.embedding_model.compute_source_embeddings(
+                                        contents
                                     )
 
                                 # Create documents and write to database

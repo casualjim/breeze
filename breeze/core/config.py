@@ -57,14 +57,19 @@ class BreezeConfig:
         tier_multipliers = {1: 1, 2: 2, 3: 3}
         max_requests_per_minute = base_requests_per_minute * tier_multipliers[self.voyage_tier]
         
-        # Conservative calculation: assume average processing time of 3 seconds per request
-        # This gives us requests per minute / 20 as concurrent requests
-        calculated_concurrent = max_requests_per_minute // 20
+        # Very conservative calculation to avoid rate limits
+        # For tier 1, be extra conservative since that's where most users are
+        if self.voyage_tier == 1:
+            # For tier 1, use only 10-15 concurrent requests to avoid rate limits
+            calculated_concurrent = 10
+        else:
+            # For higher tiers, use 50% of rate limit / 20
+            calculated_concurrent = int((max_requests_per_minute * 0.5) / 20)
         
         # If voyage_concurrent_requests not explicitly set, use calculated value
-        # Cap at reasonable limits: min 5, max 100
+        # Cap at reasonable limits: min 5, max 30
         if self.voyage_concurrent_requests == 5:  # Default value
-            self.voyage_concurrent_requests = max(5, min(100, calculated_concurrent))
+            self.voyage_concurrent_requests = max(5, min(30, calculated_concurrent))
 
         if self.code_extensions is None:
             self.code_extensions = [

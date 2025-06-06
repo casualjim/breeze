@@ -451,7 +451,32 @@ def search(
     query: str = typer.Argument(..., help="Search query"),
     limit: int = typer.Option(10, "--limit", "-l", help="Maximum number of results"),
     min_relevance: float = typer.Option(
-        0.0, "--min-relevance", "-m", help="Minimum relevance score (0.0-1.0)"
+        0.0, "--min-relevance", "-r", help="Minimum relevance score (0.0-1.0)"
+    ),
+    model: Optional[str] = typer.Option(
+        os.getenv(
+            "BREEZE_EMBEDDING_MODEL", "ibm-granite/granite-embedding-125m-english"
+        ),
+        "--model",
+        "-m",
+        help="Embedding model to use (must match the model used for indexing)",
+    ),
+    device: Optional[str] = typer.Option(
+        os.getenv("BREEZE_EMBEDDING_DEVICE", "cpu"),
+        "--device",
+        help="Device for embeddings: cpu, cuda, mps",
+    ),
+    api_key: Optional[str] = typer.Option(
+        os.getenv("BREEZE_EMBEDDING_API_KEY", None),
+        "--api-key",
+        help="API key for cloud embedding providers",
+    ),
+    voyage_tier: int = typer.Option(
+        int(os.getenv("BREEZE_VOYAGE_TIER", "1")),
+        "--voyage-tier",
+        help="Voyage AI tier (1-3)",
+        min=1,
+        max=3,
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"
@@ -461,7 +486,18 @@ def search(
     setup_logging(verbose)
 
     async def run_search():
-        config = BreezeConfig()
+        # Create config with provided options (same as index command)
+        config_args = {}
+        if model:
+            config_args["embedding_model"] = model
+        if device:
+            config_args["embedding_device"] = device
+        if api_key:
+            config_args["embedding_api_key"] = api_key
+        if model and model.startswith("voyage-"):
+            config_args["voyage_tier"] = voyage_tier
+
+        config = BreezeConfig(**config_args)
         engine = BreezeEngine(config)
         await engine.initialize()
 
@@ -535,6 +571,31 @@ def serve(
 
 @app.command()
 def stats(
+    model: Optional[str] = typer.Option(
+        os.getenv(
+            "BREEZE_EMBEDDING_MODEL", "ibm-granite/granite-embedding-125m-english"
+        ),
+        "--model",
+        "-m",
+        help="Embedding model to use (must match the model used for indexing)",
+    ),
+    device: Optional[str] = typer.Option(
+        os.getenv("BREEZE_EMBEDDING_DEVICE", "cpu"),
+        "--device",
+        help="Device for embeddings: cpu, cuda, mps",
+    ),
+    api_key: Optional[str] = typer.Option(
+        os.getenv("BREEZE_EMBEDDING_API_KEY", None),
+        "--api-key",
+        help="API key for cloud embedding providers",
+    ),
+    voyage_tier: int = typer.Option(
+        int(os.getenv("BREEZE_VOYAGE_TIER", "1")),
+        "--voyage-tier",
+        help="Voyage AI tier (1-3)",
+        min=1,
+        max=3,
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"
     ),
@@ -543,7 +604,18 @@ def stats(
     setup_logging(verbose)
 
     async def show_stats():
-        config = BreezeConfig()
+        # Create config with provided options (same as index command)
+        config_args = {}
+        if model:
+            config_args["embedding_model"] = model
+        if device:
+            config_args["embedding_device"] = device
+        if api_key:
+            config_args["embedding_api_key"] = api_key
+        if model and model.startswith("voyage-"):
+            config_args["voyage_tier"] = voyage_tier
+
+        config = BreezeConfig(**config_args)
         engine = BreezeEngine(config)
         await engine.initialize()
 
@@ -558,6 +630,14 @@ def stats(
         table.add_row("Initialized", "✓" if stats.get("initialized", False) else "✗")
         table.add_row("Embedding Model", stats.get("model", "Unknown"))
         table.add_row("Database Path", stats.get("database_path", "Unknown"))
+
+        # Show failed batch info if any
+        failed_batches = stats.get("failed_batches", {})
+        if failed_batches and failed_batches.get("total", 0) > 0:
+            table.add_row("Failed Batches (Total)", str(failed_batches.get("total", 0)))
+            table.add_row("Failed Batches (Pending)", str(failed_batches.get("pending", 0)))
+            if "next_retry_at" in failed_batches:
+                table.add_row("Next Retry", failed_batches["next_retry_at"])
 
         console.print(table)
 

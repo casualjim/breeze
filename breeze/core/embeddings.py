@@ -7,6 +7,7 @@ import pyarrow as pa
 
 from lancedb.embeddings import EmbeddingFunction
 from lancedb.embeddings.registry import register
+from breeze.core.rate_limiter import RateLimiterV2
 
 
 def sanitize_text_input(inputs) -> List[str]:
@@ -98,16 +99,29 @@ class VoyageCode3EmbeddingFunction(EmbeddingFunction):
         return VoyageCode3EmbeddingFunction.client
 
 
+
+# Global rate limiter instance (shared across all calls)
+_voyage_rate_limiter = None
+
+def _get_rate_limiter(tokens_per_minute: int, requests_per_minute: int) -> RateLimiterV2:
+    """Get or create the global rate limiter."""
+    global _voyage_rate_limiter
+    if _voyage_rate_limiter is None:
+        _voyage_rate_limiter = RateLimiterV2(requests_per_minute, tokens_per_minute)
+    return _voyage_rate_limiter
+
+
 # Voyage token limit handling functions
 async def get_voyage_embeddings_with_limits(
     texts,
     model,
     tokenizer=None,
     max_concurrent_requests=5,
-    max_retries=3,
+    max_retries=3,  # Kept for compatibility but we use time-based retries for rate limits
     retry_base_delay=1.0,
     tokens_per_minute=3_000_000,
     requests_per_minute=2000,
+    max_retry_duration=600,  # 10 minutes max retry time for rate limits
 ):
     """Get embeddings from Voyage AI with proper token limit handling.
 
@@ -130,14 +144,13 @@ async def get_voyage_embeddings_with_limits(
     MAX_TOKENS_PER_BATCH = 120000  # Voyage's limit per request
     MAX_TEXTS_PER_BATCH = 128  # Voyage's limit per request
     
-    # Rate limiting trackers
-    request_times = []  # Track request timestamps
-    token_counts = []   # Track token counts with timestamps
-
-    # Shared rate limit state - acts as a latch
-    rate_limit_lock = asyncio.Lock()
-    rate_limited = False
-    rate_limit_until = 0  # Timestamp when rate limit expires
+    # Get the global rate limiter with 10% safety margin
+    # This helps avoid hitting the actual API limits
+    safe_tokens_per_minute = int(tokens_per_minute * 0.9)
+    safe_requests_per_minute = int(requests_per_minute * 0.9)
+    rate_limiter = _get_rate_limiter(safe_tokens_per_minute, safe_requests_per_minute)
+    
+    # Track failed batches
     failed_batches = set()  # Track which batches failed
 
     def estimate_tokens(text):
@@ -198,101 +211,46 @@ async def get_voyage_embeddings_with_limits(
     # Semaphore to limit concurrent API calls
     semaphore = asyncio.Semaphore(max_concurrent_requests)
 
-    async def check_rate_limits(batch_tokens):
-        """Check if we're within rate limits."""
-        async with rate_limit_lock:
-            current_time = time.time()
-            one_minute_ago = current_time - 60
-            
-            # Clean up old entries
-            nonlocal request_times, token_counts
-            request_times = [t for t in request_times if t > one_minute_ago]
-            token_counts = [(t, c) for t, c in token_counts if t > one_minute_ago]
-            
-            # Check request rate
-            if len(request_times) >= requests_per_minute:
-                # Calculate when the oldest request will expire
-                wait_time = 60 - (current_time - request_times[0])
-                return False, wait_time
-            
-            # Check token rate
-            total_tokens = sum(c for _, c in token_counts) + batch_tokens
-            if total_tokens > tokens_per_minute:
-                # Calculate when enough tokens will expire
-                tokens_to_free = total_tokens - tokens_per_minute
-                accumulated = 0
-                for t, c in token_counts:
-                    accumulated += c
-                    if accumulated >= tokens_to_free:
-                        wait_time = 60 - (current_time - t)
-                        return False, wait_time
-                # Fallback: wait for oldest tokens to expire
-                if token_counts:
-                    wait_time = 60 - (current_time - token_counts[0][0])
-                    return False, wait_time
-            
-            return True, 0
-
-    async def record_request(batch_tokens):
-        """Record a request for rate limiting."""
-        async with rate_limit_lock:
-            current_time = time.time()
-            request_times.append(current_time)
-            token_counts.append((current_time, batch_tokens))
-
     async def process_batch(batch_idx, batch):
         """Process a single batch with the API."""
-        nonlocal rate_limited, rate_limit_until
-
-        import logging
-        import time
-
         logger = logging.getLogger(__name__)
         
         # Calculate tokens in this batch
         batch_tokens = sum(estimate_tokens(text) for text in batch)
+        
+        # Track when we started trying this batch
+        batch_start_time = time.time()
 
         async with semaphore:
-            for attempt in range(max_retries):
-                # Check tier-based rate limits
-                can_proceed, wait_time = await check_rate_limits(batch_tokens)
-                if not can_proceed:
-                    logger.info(
-                        f"Batch {batch_idx + 1}: Approaching rate limit, waiting {wait_time:.1f}s"
+            attempt = 0
+            while True:
+                # Check if we've been trying for too long (10 minutes)
+                if time.time() - batch_start_time > max_retry_duration:
+                    failed_batches.add(batch_idx)
+                    error_msg = (
+                        f"Failed to process batch {batch_idx + 1} after {max_retry_duration}s of retries"
                     )
-                    await asyncio.sleep(wait_time)
-                    continue
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
                 
-                # Also check if we're rate limited from a 429 response
-                while True:
-                    wait_time = 0
-                    async with rate_limit_lock:
-                        current_time = time.time()
-                        if rate_limited and rate_limit_until > current_time:
-                            wait_time = rate_limit_until - current_time
-                        else:
-                            # Not rate limited or rate limit expired
-                            if rate_limited and rate_limit_until <= current_time:
-                                rate_limited = False
-                                rate_limit_until = 0
-                            break
-
-                    # Wait outside the lock
-                    if wait_time > 0:
-                        logger.info(
-                            f"Batch {batch_idx + 1}: Waiting {wait_time:.1f}s for rate limit to expire"
-                        )
-                        await asyncio.sleep(wait_time)
-
                 try:
-                    # Record the request before making the API call
-                    await record_request(batch_tokens)
-                    
-                    # Make the API call
-                    embeddings = await asyncio.to_thread(
-                        model.compute_source_embeddings, batch
+                    # Use rate limiter context manager to hold tokens for entire operation
+                    async with rate_limiter.acquire(batch_tokens, timeout=60):
+                        logger.info(
+                            f"Batch {batch_idx + 1}: Acquired {batch_tokens} tokens, making API call"
+                        )
+                        
+                        # Make the API call while holding the tokens
+                        embeddings = await asyncio.to_thread(
+                            model.compute_source_embeddings, batch
+                        )
+                        return embeddings
+                        
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Batch {batch_idx + 1}: Timeout waiting for rate limiter after 60s"
                     )
-                    return embeddings
+                    continue
                 except Exception as e:
                     # Check if it's a rate limit error (429)
                     error_str = str(e).lower()
@@ -301,35 +259,35 @@ async def get_voyage_embeddings_with_limits(
                         or "rate limit" in error_str
                         or "too many requests" in error_str
                     ):
-                        async with rate_limit_lock:
-                            if attempt < max_retries - 1:
-                                # Calculate backoff delay
-                                delay = retry_base_delay * (2**attempt) + (
-                                    0.1 * attempt
-                                )
-                                rate_limited = True
-                                rate_limit_until = time.time() + delay
+                        # We hit a rate limit despite our token bucket
+                        # This means our limits are set too high
+                        # Wait with exponential backoff
+                        delay = min(30, max(5, 5 + (attempt * 5)))
+                        
+                        logger.warning(
+                            f"Rate limited on batch {batch_idx + 1} despite token bucket: {e}. "
+                            f"Waiting {delay:.0f}s before retry (attempt {attempt + 1}). "
+                            f"Consider reducing concurrent requests or rate limits."
+                        )
 
-                                logger.warning(
-                                    f"Rate limited on batch {batch_idx + 1}, setting global rate limit for {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                                )
-
-                        # Wait for the delay (outside the lock)
                         await asyncio.sleep(delay)
+                        attempt += 1
                         continue
                     else:
-                        # For non-rate-limit errors, fail immediately
-                        logger.error(f"Error in Voyage batch {batch_idx + 1}: {e}")
-                        failed_batches.add(batch_idx)
-                        raise
-
-            # Exhausted all retries
-            failed_batches.add(batch_idx)
-            error_msg = (
-                f"Failed to process batch {batch_idx + 1} after {max_retries} attempts"
-            )
-            logger.error(error_msg)
-            raise Exception(error_msg)
+                        # For non-rate-limit errors, still retry but with shorter delays
+                        if attempt < 3:  # Try up to 3 times for non-rate-limit errors
+                            delay = 2 * (attempt + 1)
+                            logger.warning(
+                                f"Error in batch {batch_idx + 1}: {e}. Retrying in {delay}s (attempt {attempt + 1})"
+                            )
+                            await asyncio.sleep(delay)
+                            attempt += 1
+                            continue
+                        else:
+                            # Give up on non-rate-limit errors after 3 attempts
+                            logger.error(f"Error in Voyage batch {batch_idx + 1}: {e}")
+                            failed_batches.add(batch_idx)
+                            raise
 
     # Process all batches concurrently
     tasks = [process_batch(idx, batch) for idx, batch in enumerate(safe_batches)]
@@ -337,21 +295,30 @@ async def get_voyage_embeddings_with_limits(
     # Use gather with return_exceptions=True to handle failures gracefully
     batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Check for failures
+    # Check for failures and collect successful embeddings
     all_embeddings = []
+    successful_batches = []
+    
     for idx, result in enumerate(batch_results):
         if isinstance(result, Exception):
             logger.error(f"Batch {idx} failed: {result}")
             failed_batches.add(idx)
         else:
             all_embeddings.extend(result)
+            successful_batches.append(idx)
 
-    # If any batches failed, raise an exception
+    # Always return results with metadata - let caller decide what to do with failures
     if failed_batches:
-        failed_count = len(failed_batches)
         total_count = len(safe_batches)
-        error_msg = f"Failed to generate embeddings for {failed_count}/{total_count} batches: {sorted(failed_batches)}"
-        logger.error(error_msg)
-        raise Exception(error_msg)
-
-    return np.array(all_embeddings)
+        logger.warning(
+            f"Partially completed: {len(successful_batches)}/{total_count} batches succeeded. "
+            f"Failed batches: {sorted(failed_batches)}"
+        )
+    
+    return {
+        'embeddings': np.array(all_embeddings) if all_embeddings else np.array([]),
+        'successful_batches': successful_batches,
+        'failed_batches': list(failed_batches),
+        'texts': texts,
+        'safe_batches': safe_batches
+    }
