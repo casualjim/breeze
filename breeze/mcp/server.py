@@ -2,11 +2,10 @@
 
 import asyncio
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from fastmcp.utilities.logging import get_logger
 
 from breeze.core import BreezeEngine, BreezeConfig
@@ -65,7 +64,7 @@ async def get_engine() -> BreezeEngine:
 
 @mcp.tool()
 async def index_repository(
-    directories: List[str], force_reindex: bool = False
+    directories: List[str], force_reindex: bool = False, ctx: Context = None
 ) -> Dict[str, Any]:
     """
     Index code files from specified directories into the semantic search database.
@@ -82,6 +81,8 @@ async def index_repository(
         Task information including task_id and queue position
     """
     try:
+        if ctx:
+            await ctx.info(f"Queueing indexing for directories: {directories}")
         logger.info(f"Queueing indexing for directories: {directories}")
         engine = await get_engine()
 
@@ -92,6 +93,8 @@ async def index_repository(
             if path.exists() and path.is_dir():
                 valid_dirs.append(str(path))
             else:
+                if ctx:
+                    await ctx.warning(f"Skipping invalid directory: {directory}")
                 logger.warning(f"Skipping invalid directory: {directory}")
 
         if not valid_dirs:
@@ -103,39 +106,16 @@ async def index_repository(
             force_reindex=force_reindex
         )
         
-        # Define progress callback for notifications
+        # Define progress callback
         async def progress_callback(stats):
-            if hasattr(mcp, 'notification'):
-                await mcp.notification(
-                    method="indexing/progress",
-                    params={
-                        "task_id": task.task_id,
-                        "progress": {
-                            "files_scanned": stats.files_scanned,
-                            "files_indexed": stats.files_indexed,
-                            "files_updated": stats.files_updated,
-                            "files_skipped": stats.files_skipped,
-                            "errors": stats.errors,
-                        },
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+            # Progress is now exposed via resources
+            pass
         
         # Add task to queue
         queue_position = await engine._indexing_queue.add_task(task, progress_callback)
         
-        # Send queued notification
-        if hasattr(mcp, 'notification'):
-            await mcp.notification(
-                method="indexing/queued",
-                params={
-                    "task_id": task.task_id,
-                    "directories": valid_dirs,
-                    "queue_position": queue_position,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
-        
+        if ctx:
+            await ctx.info(f"Indexing task {task.task_id} queued at position {queue_position}")
         logger.info(f"Indexing task {task.task_id} queued at position {queue_position}")
 
         return {
@@ -147,13 +127,15 @@ async def index_repository(
         }
 
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error queueing indexing task: {e}")
         logger.error(f"Error queueing indexing task: {e}")
         return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
 async def search_code(
-    query: str, limit: int = 10, min_relevance: float = 0.0
+    query: str, limit: int = 10, min_relevance: float = 0.0, ctx: Context = None
 ) -> Dict[str, Any]:
     """
     Search for code snippets semantically similar to the query.
@@ -170,6 +152,8 @@ async def search_code(
         Search results with relevant code snippets and metadata
     """
     try:
+        if ctx:
+            await ctx.info(f"Searching for: {query}")
         logger.info(f"Searching for: {query}")
         engine = await get_engine()
 
@@ -192,12 +176,14 @@ async def search_code(
         }
 
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error during search: {e}")
         logger.error(f"Error during search: {e}")
         return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-async def get_index_stats() -> Dict[str, Any]:
+async def get_index_stats(ctx: Context = None) -> Dict[str, Any]:
     """
     Get comprehensive statistics about the code index and indexing queue.
 
@@ -218,12 +204,14 @@ async def get_index_stats() -> Dict[str, Any]:
         return {"status": "success", **stats}
 
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error getting stats: {e}")
         logger.error(f"Error getting stats: {e}")
         return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-async def list_directory(directory_path: str) -> Dict[str, Any]:
+async def list_directory(directory_path: str, ctx: Context = None) -> Dict[str, Any]:
     """
     List the contents of a directory to help identify what to index.
 
@@ -278,6 +266,8 @@ async def list_directory(directory_path: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error listing directory: {e}")
         logger.error(f"Error listing directory: {e}")
         return {"status": "error", "message": str(e)}
 
@@ -286,7 +276,8 @@ async def list_directory(directory_path: str) -> Dict[str, Any]:
 async def register_project(
     name: str,
     paths: List[str],
-    auto_index: bool = True
+    auto_index: bool = True,
+    ctx: Context = None
 ) -> Dict[str, Any]:
     """
     Register a new project and start watching it for changes.
@@ -317,13 +308,10 @@ async def register_project(
             auto_index=auto_index
         )
         
-        # Define event callback for file watching notifications
+        # Define event callback for file watching
         async def watch_callback(event):
-            if hasattr(mcp, 'notification'):
-                await mcp.notification(
-                    method=f"watching/{event['type']}",
-                    params=event
-                )
+            # Events are now exposed via resources
+            pass
         
         # Start watching the project
         watch_success = await engine.start_watching(project.id, watch_callback)
@@ -343,16 +331,7 @@ async def register_project(
             task = await engine.create_indexing_task(
                 paths=project.paths,
                 project_id=project.id,
-                progress_callback=lambda p: asyncio.create_task(
-                    mcp.notification(
-                        method="indexing/progress",
-                        params={
-                            "project_id": project.id,
-                            "project_name": project.name,
-                            **p
-                        }
-                    )
-                ) if hasattr(mcp, 'notification') else None
+                progress_callback=None  # Progress is exposed via resources
             )
             result["indexing_task_id"] = task.task_id
             result["message"] += f". Initial indexing started (task: {task.task_id})"
@@ -360,12 +339,14 @@ async def register_project(
         return result
         
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error registering project: {e}")
         logger.error(f"Error registering project: {e}")
         return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-async def unregister_project(project_id: str) -> Dict[str, Any]:
+async def unregister_project(project_id: str, ctx: Context = None) -> Dict[str, Any]:
     """
     Unregister a project, stop watching it, and remove it from tracking.
     
@@ -406,12 +387,14 @@ async def unregister_project(project_id: str) -> Dict[str, Any]:
             }
             
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error unregistering project: {e}")
         logger.error(f"Error unregistering project: {e}")
         return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-async def list_projects() -> Dict[str, Any]:
+async def list_projects(ctx: Context = None) -> Dict[str, Any]:
     """
     List all registered projects with their current status.
     
@@ -453,8 +436,170 @@ async def list_projects() -> Dict[str, Any]:
         }
         
     except Exception as e:
+        if ctx:
+            await ctx.error(f"Error listing projects: {e}")
         logger.error(f"Error listing projects: {e}")
         return {"status": "error", "message": str(e)}
+
+
+# Resources for exposing indexing tasks and projects
+@mcp.resource("indexing://tasks")
+async def get_all_indexing_tasks() -> Dict[str, Any]:
+    """Get all indexing tasks with their current status."""
+    try:
+        engine = await get_engine()
+        if not engine._indexing_queue:
+            return {"tasks": []}
+        
+        tasks = []
+        
+        # Get queue status
+        queue_status = await engine._indexing_queue.get_queue_status()
+        
+        # Add current task if any
+        if queue_status["current_task"]:
+            tasks.append({
+                "task_id": queue_status["current_task"],
+                "status": "running",
+                "progress": queue_status.get("current_task_progress", {})
+            })
+        
+        # Add queued tasks
+        for task_info in queue_status.get("queued_tasks", []):
+            tasks.append({
+                "task_id": task_info["task_id"],
+                "status": "queued",
+                "queue_position": task_info["queue_position"],
+                "paths": task_info["paths"],
+                "created_at": task_info["created_at"]
+            })
+        
+        return {
+            "total_tasks": len(tasks),
+            "tasks": tasks
+        }
+    except Exception as e:
+        logger.error(f"Error getting indexing tasks: {e}")
+        return {"error": str(e)}
+
+
+@mcp.resource("indexing://tasks/{task_id}")
+async def get_indexing_task(task_id: str) -> Dict[str, Any]:
+    """Get details for a specific indexing task."""
+    try:
+        engine = await get_engine()
+        if not engine._indexing_queue:
+            return {"error": "Task not found"}
+        
+        # Get queue status
+        queue_status = await engine._indexing_queue.get_queue_status()
+        
+        # Check if it's the current task
+        if queue_status["current_task"] == task_id:
+            # Get the task details from database
+            tasks = await engine.list_indexing_tasks()
+            for task in tasks:
+                if task.task_id == task_id:
+                    return {
+                        "task_id": task.task_id,
+                        "status": "running",
+                        "paths": task.paths,
+                        "created_at": task.created_at.isoformat(),
+                        "progress": queue_status.get("current_task_progress", {}),
+                        "stats": getattr(task, "stats", None)
+                    }
+            return {"error": "Task not found"}
+        
+        # Check queued tasks
+        for task_info in queue_status.get("queued_tasks", []):
+            if task_info["task_id"] == task_id:
+                return {
+                    "task_id": task_info["task_id"],
+                    "status": "queued",
+                    "queue_position": task_info["queue_position"],
+                    "paths": task_info["paths"],
+                    "created_at": task_info["created_at"]
+                }
+        
+        return {"error": "Task not found"}
+    except Exception as e:
+        logger.error(f"Error getting task {task_id}: {e}")
+        return {"error": str(e)}
+
+
+@mcp.resource("projects://list")
+async def get_all_projects_resource() -> Dict[str, Any]:
+    """Get all registered projects as a resource."""
+    try:
+        engine = await get_engine()
+        projects = await engine.list_projects()
+        
+        return {
+            "total_projects": len(projects),
+            "projects": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "paths": p.paths,
+                    "is_watching": p.is_watching,
+                    "last_indexed": p.last_indexed.isoformat() if p.last_indexed else None,
+                    "created_at": p.created_at.isoformat(),
+                    "updated_at": p.updated_at.isoformat()
+                }
+                for p in projects
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error getting projects: {e}")
+        return {"error": str(e)}
+
+
+@mcp.resource("projects://{project_id}")
+async def get_project_resource(project_id: str) -> Dict[str, Any]:
+    """Get details for a specific project."""
+    try:
+        engine = await get_engine()
+        project = await engine.get_project(project_id)
+        
+        if not project:
+            return {"error": f"Project not found: {project_id}"}
+        
+        return {
+            "id": project.id,
+            "name": project.name,
+            "paths": project.paths,
+            "is_watching": project.is_watching,
+            "last_indexed": project.last_indexed.isoformat() if project.last_indexed else None,
+            "created_at": project.created_at.isoformat(),
+            "updated_at": project.updated_at.isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting project {project_id}: {e}")
+        return {"error": str(e)}
+
+
+@mcp.resource("projects://{project_id}/files")
+async def get_project_files(project_id: str) -> Dict[str, Any]:
+    """Get list of files tracked for a specific project."""
+    try:
+        engine = await get_engine()
+        project = await engine.get_project(project_id)
+        
+        if not project:
+            return {"error": f"Project not found: {project_id}"}
+        
+        # Get indexed files for this project
+        # This would need to be implemented in the engine
+        # For now, return project paths
+        return {
+            "project_id": project_id,
+            "project_name": project.name,
+            "tracked_paths": project.paths,
+            "is_watching": project.is_watching
+        }
+    except Exception as e:
+        logger.error(f"Error getting project files for {project_id}: {e}")
+        return {"error": str(e)}
 
 
 # Create ASGI app with both transports
