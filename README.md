@@ -13,6 +13,7 @@ A high-performance MCP (Model Context Protocol) server for semantic code search 
 - 🔍 **Intelligent Content Detection** - Automatically identifies code files using content analysis, not just extensions
 - 📂 **Project Management** - Register projects for automatic file watching and re-indexing on changes
 - ⏳ **Async Queue System** - Long-running indexing operations are queued and processed in the background
+- ⚠️ **Single-Writer Design** - See [Concurrency Limitations](#important-concurrency-limitations)
 
 ## Quick Start
 
@@ -122,7 +123,7 @@ async def main():
     # Configure engine
     config = BreezeConfig(
         data_root="/path/to/index/storage",
-        embedding_model="nomic-ai/CodeRankEmbed"
+        embedding_model="ibm-granite/granite-embedding-125m-english"
     )
     
     # Create engine
@@ -218,7 +219,7 @@ List all registered projects with their current status.
 
 - `BREEZE_DATA_ROOT`: Directory for storing index data (default: `~/.breeze/data`)
 - `BREEZE_DB_NAME`: Database name (default: `code_index`)
-- `BREEZE_EMBEDDING_MODEL`: Embedding model to use (default: `nomic-ai/CodeRankEmbed`)
+- `BREEZE_EMBEDDING_MODEL`: Embedding model to use (default: `ibm-granite/granite-embedding-125m-english`)
 - `BREEZE_EMBEDDING_API_KEY`: API key for cloud embedding providers
 - `BREEZE_HOST`: Server host (default: `0.0.0.0`)
 - `BREEZE_PORT`: Server port (default: `9483`)
@@ -265,6 +266,38 @@ Run the test script to verify functionality:
 ```bash
 uv run python test_breeze.py
 ```
+
+## Important: Concurrency Limitations
+
+**⚠️ LanceDB (the vector database used by Breeze) does not support concurrent writes from multiple processes.**
+
+This means:
+- You cannot run CLI indexing commands while the MCP server is running
+- Multiple Breeze instances cannot write to the same database simultaneously
+
+### Solutions:
+
+1. **Stop the server before indexing via CLI:**
+   ```bash
+   # Stop server (if running)
+   launchctl stop com.breeze-mcp.server  # macOS
+   
+   # Run indexing
+   python -m breeze index /path/to/code
+   
+   # Restart server
+   launchctl start com.breeze-mcp.server
+   ```
+
+2. **Use MCP tools instead of CLI when server is running:**
+   - Use `index_repository` tool through Claude or MCP client
+   - The server's internal queue handles write serialization
+
+3. **For multiple instances:**
+   - Each instance must use a different `BREEZE_DATA_ROOT`
+   - Or implement external locking (Redis, DynamoDB, etc.)
+
+See the [Concurrency Guide](docs/concurrency.md) for detailed information.
 
 ## Deployment
 
@@ -318,10 +351,10 @@ docker run -d \
 
 ### Performance Comparison
 
-| Method | Hardware Acceleration | Embedding Speed |
-|--------|----------------------|----------------|
-| Native macOS | MPS (Metal) | ~10x faster on Apple Silicon |
-| Docker | CPU only | Baseline speed |
+| Method       | Hardware Acceleration | Embedding Speed              |
+| ------------ | --------------------- | ---------------------------- |
+| Native macOS | MPS (Metal)           | ~10x faster on Apple Silicon |
+| Docker       | CPU only              | Baseline speed               |
 
 ## Architecture
 
