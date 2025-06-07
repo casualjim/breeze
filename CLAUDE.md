@@ -8,7 +8,7 @@ Breeze is an MCP (Model Context Protocol) server that supports streamable HTTP t
 
 ## Development Setup
 
-- Python version: 3.13
+- Python version: 3.12
 - Virtual environment: `.venv` directory
 - Dependencies: Listed in `pyproject.toml` (lancedb, fastmcp)
 
@@ -54,7 +54,10 @@ uv run pytest
 
 ## Guidelines for Modification
 
-DO NOT ADD FILES, MODIFY THE EXISTING ONES
+- DO NOT ADD FILES, MODIFY THE EXISTING ONES
+- Do not make up requirements or features.
+- KISS: Keep it Simple, stupid! the simplest possible implementation
+- YAGNI: You are not going to need it
 
 ## Technology Preferences
 

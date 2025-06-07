@@ -27,8 +27,8 @@ Breeze can be configured through environment variables, command-line options, or
 | ----------------------------- | ------------------------------- | ------- |
 | `BREEZE_CONCURRENT_READERS`   | Concurrent file readers         | `20`    |
 | `BREEZE_CONCURRENT_EMBEDDERS` | Concurrent embedding operations | `10`    |
-| `BREEZE_CONCURRENT_WRITERS`   | Concurrent database writers     | `10`    |
 | `BREEZE_BATCH_SIZE`           | Documents per batch             | `100`   |
+
 
 ### Voyage AI Specific
 
@@ -259,6 +259,7 @@ class BreezeConfig:
     chunk_size: int = 1500
     chunk_overlap: int = 200
 ```
+
 
 ## Configuration Examples
 

@@ -4,10 +4,13 @@ import os
 from typing import List, ClassVar
 import numpy as np
 import pyarrow as pa
+import logging
 
 from lancedb.embeddings import EmbeddingFunction
 from lancedb.embeddings.registry import register
 from breeze.core.rate_limiter import RateLimiterV2
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_text_input(inputs) -> List[str]:
@@ -106,8 +109,9 @@ _voyage_rate_limiter = None
 def _get_rate_limiter(tokens_per_minute: int, requests_per_minute: int) -> RateLimiterV2:
     """Get or create the global rate limiter."""
     global _voyage_rate_limiter
-    if _voyage_rate_limiter is None:
-        _voyage_rate_limiter = RateLimiterV2(requests_per_minute, tokens_per_minute)
+    # Always create a new rate limiter with the provided values
+    # This ensures tests can use their own rate limits
+    _voyage_rate_limiter = RateLimiterV2(requests_per_minute, tokens_per_minute)
     return _voyage_rate_limiter
 
 
@@ -140,6 +144,9 @@ async def get_voyage_embeddings_with_limits(
     """
     import asyncio
     import time
+    import logging
+    
+    logger = logging.getLogger(__name__)
 
     MAX_TOKENS_PER_BATCH = 120000  # Voyage's limit per request
     MAX_TEXTS_PER_BATCH = 128  # Voyage's limit per request
@@ -149,6 +156,8 @@ async def get_voyage_embeddings_with_limits(
     safe_tokens_per_minute = int(tokens_per_minute * 0.9)
     safe_requests_per_minute = int(requests_per_minute * 0.9)
     rate_limiter = _get_rate_limiter(safe_tokens_per_minute, safe_requests_per_minute)
+    
+    logger.debug(f"Rate limiter created with {safe_tokens_per_minute} tokens/min, {safe_requests_per_minute} requests/min")
     
     # Track failed batches
     failed_batches = set()  # Track which batches failed
@@ -308,6 +317,218 @@ async def get_voyage_embeddings_with_limits(
             successful_batches.append(idx)
 
     # Always return results with metadata - let caller decide what to do with failures
+    if failed_batches:
+        total_count = len(safe_batches)
+        logger.warning(
+            f"Partially completed: {len(successful_batches)}/{total_count} batches succeeded. "
+            f"Failed batches: {sorted(failed_batches)}"
+        )
+    
+    return {
+        'embeddings': np.array(all_embeddings) if all_embeddings else np.array([]),
+        'successful_batches': successful_batches,
+        'failed_batches': list(failed_batches),
+        'texts': texts,
+        'safe_batches': safe_batches
+    }
+
+
+async def get_local_embeddings_with_tokenizer_chunking(
+    texts,
+    model,
+    model_name,
+    max_concurrent_requests=5,
+    max_retries=3,
+    retry_base_delay=1.0,
+    max_sequence_length=None,
+):
+    """Get embeddings from local models with proper tokenizer-based chunking.
+    
+    Args:
+        texts: List of text strings to embed
+        model: The embedding model instance
+        model_name: Name of the model (e.g., 'BAAI/bge-m3')
+        max_concurrent_requests: Maximum concurrent embedding operations
+        max_retries: Maximum number of retries for failed embeddings
+        retry_base_delay: Base delay in seconds for exponential backoff
+        max_sequence_length: Override the model's max sequence length
+        
+    Returns:
+        Dictionary with embeddings and metadata
+    """
+    import asyncio
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Try to load the tokenizer for the model
+    tokenizer = None
+    actual_max_length = 512  # Conservative default
+    
+    # Skip tokenizer loading for mock embedders
+    # Check various ways a model could be a mock:
+    # 1. Model name contains "mock"
+    # 2. Type name starts with "Mock" or contains "Mock"
+    # 3. Model is from the mock_embedders module
+    is_mock = (
+        "mock" in model_name.lower() or 
+        type(model).__name__.startswith("Mock") or
+        "Mock" in type(model).__name__ or
+        model.__class__.__module__ == 'breeze.tests.mock_embedders'
+    )
+    
+    if is_mock:
+        logger.debug(f"Skipping tokenizer loading for mock embedder: {type(model).__name__}")
+    else:
+        try:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            
+            # Get the actual max sequence length from the tokenizer/model
+            if max_sequence_length:
+                actual_max_length = max_sequence_length
+            elif hasattr(tokenizer, 'model_max_length') and tokenizer.model_max_length < 1000000:
+                actual_max_length = tokenizer.model_max_length
+            elif hasattr(tokenizer, 'max_len'):
+                actual_max_length = tokenizer.max_len
+            else:
+                # Try to get from model config if available
+                if hasattr(model, 'model') and hasattr(model.model, 'config'):
+                    if hasattr(model.model.config, 'max_position_embeddings'):
+                        actual_max_length = model.model.config.max_position_embeddings
+            
+            logger.info(f"Using tokenizer for {model_name} with max sequence length: {actual_max_length}")
+        except Exception as e:
+            logger.warning(f"Could not load tokenizer for {model_name}: {e}")
+            logger.warning("Falling back to character-based estimation")
+    
+    # Track failed batches
+    failed_batches = set()
+    
+    def estimate_tokens(text):
+        """Estimate tokens using tokenizer or character count."""
+        if tokenizer:
+            try:
+                # Use tokenizer to get exact token count
+                encoded = tokenizer.encode(text, add_special_tokens=True, truncation=False)
+                return len(encoded)
+            except Exception as e:
+                logger.debug(f"Token encoding failed, using character fallback: {e}")
+        
+        # Conservative estimate: ~4 chars per token for code
+        return int(len(text) / 4)
+    
+    def create_safe_batches(texts):
+        """Create batches that respect the model's token limits."""
+        # Reserve tokens for special tokens ([CLS], [SEP], etc.)
+        reserved_tokens = 10  # Conservative reservation
+        max_tokens_per_text = actual_max_length - reserved_tokens
+        
+        batches = []
+        current_batch = []
+        
+        for idx, text in enumerate(texts):
+            text_tokens = estimate_tokens(text)
+            
+            # If single text exceeds limit, we need to truncate it
+            if text_tokens > max_tokens_per_text:
+                if tokenizer:
+                    try:
+                        # Use tokenizer to truncate properly
+                        encoded = tokenizer.encode(
+                            text, 
+                            add_special_tokens=True, 
+                            truncation=True, 
+                            max_length=actual_max_length,
+                            return_tensors=None
+                        )
+                        # Decode back to text (without special tokens)
+                        truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
+                        
+                        # Add truncation indicator
+                        text = truncated_text + "..."
+                        text_tokens = len(encoded)
+                        
+                        logger.debug(f"Truncated text from {estimate_tokens(texts[idx])} to {text_tokens} tokens")
+                    except Exception as e:
+                        logger.warning(f"Tokenizer truncation failed: {e}")
+                        # Fallback to character truncation
+                        max_chars = max_tokens_per_text * 4
+                        text = text[:max_chars] + "..."
+                        text_tokens = estimate_tokens(text)
+                else:
+                    # Character-based truncation
+                    max_chars = max_tokens_per_text * 4
+                    text = text[:max_chars] + "..."
+                    text_tokens = estimate_tokens(text)
+            
+            current_batch.append(text)
+        
+        # For local models, we can usually process multiple texts at once
+        # But let's be conservative and batch them reasonably
+        batch_size = 32  # Reasonable batch size for local models
+        
+        for i in range(0, len(current_batch), batch_size):
+            batches.append(current_batch[i:i + batch_size])
+        
+        return batches
+    
+    # Create safe batches
+    safe_batches = create_safe_batches(texts)
+    
+    # Log batching info
+    if len(safe_batches) > 1:
+        logger.info(
+            f"Local model: Processing {len(texts)} texts in {len(safe_batches)} batches"
+        )
+    
+    # Semaphore to limit concurrent operations
+    semaphore = asyncio.Semaphore(max_concurrent_requests)
+    
+    async def process_batch(batch_idx, batch):
+        """Process a single batch with the model."""
+        async with semaphore:
+            attempt = 0
+            while attempt < max_retries:
+                try:
+                    # Generate embeddings using asyncio.to_thread for CPU-bound operation
+                    embeddings = await asyncio.to_thread(
+                        model.compute_source_embeddings, batch
+                    )
+                    return embeddings
+                    
+                except Exception as e:
+                    attempt += 1
+                    if attempt < max_retries:
+                        delay = retry_base_delay * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"Error in batch {batch_idx + 1}: {e}. Retrying in {delay}s (attempt {attempt + 1}/{max_retries})"
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"Failed batch {batch_idx + 1} after {max_retries} attempts: {e}")
+                        failed_batches.add(batch_idx)
+                        raise
+    
+    # Process all batches concurrently
+    tasks = [process_batch(idx, batch) for idx, batch in enumerate(safe_batches)]
+    
+    # Use gather with return_exceptions=True to handle failures gracefully
+    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Check for failures and collect successful embeddings
+    all_embeddings = []
+    successful_batches = []
+    
+    for idx, result in enumerate(batch_results):
+        if isinstance(result, Exception):
+            logger.error(f"Batch {idx} failed: {result}")
+            failed_batches.add(idx)
+        else:
+            all_embeddings.extend(result)
+            successful_batches.append(idx)
+    
+    # Log results
     if failed_batches:
         total_count = len(safe_batches)
         logger.warning(

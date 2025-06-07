@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from breeze.core.engine import BreezeEngine
 from breeze.core.config import BreezeConfig
 from breeze.core.models import Project
+from lancedb.embeddings.registry import get_registry
+from .mock_embedders import MockReranker
 
 
 @pytest.mark.asyncio
@@ -18,10 +20,11 @@ async def test_project_table_initialization():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Table should be created during engine initialization
@@ -45,10 +48,11 @@ async def test_add_project():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create test directories
@@ -89,10 +93,11 @@ async def test_add_project_invalid_path():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Try to add project with non-existent path
@@ -112,10 +117,11 @@ async def test_add_project_duplicate_path():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create test directory
@@ -145,10 +151,11 @@ async def test_list_projects():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Initially empty
@@ -182,10 +189,11 @@ async def test_get_project():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create and add a project
@@ -218,10 +226,11 @@ async def test_remove_project():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create and add a project
@@ -257,10 +266,11 @@ async def test_update_project_indexed_time():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create and add a project
@@ -298,10 +308,11 @@ async def test_file_watching_lifecycle():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create and add a project
@@ -363,10 +374,11 @@ async def test_get_watching_projects():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create multiple projects
@@ -413,10 +425,11 @@ async def test_project_with_file_watching_and_remove():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create and add a project
@@ -448,12 +461,13 @@ async def test_project_default_values():
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_projects",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=get_registry().get("mock-local").create(),  # Use fast mock embedder
             code_extensions=[".py", ".js", ".ts"],
             exclude_patterns=["node_modules", "__pycache__", ".git"]
         )
         
         engine = BreezeEngine(config)
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create project with minimal args

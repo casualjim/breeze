@@ -2,7 +2,10 @@
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lancedb.embeddings import EmbeddingFunction
 import platformdirs
 
 
@@ -19,11 +22,13 @@ class BreezeConfig:
     embedding_device: str = "cpu"  # Device for embeddings: 'cpu', 'cuda', 'mps'
     trust_remote_code: bool = True
     embedding_api_key: Optional[str] = None  # API key for cloud embedding providers
+    max_sequence_length: Optional[int] = None  # Override max sequence length for local models
+    embedding_function: Optional["EmbeddingFunction"] = None  # Allow passing custom embedding function for testing
 
     # Concurrency settings for indexing
     concurrent_readers: int = 20
     concurrent_embedders: int = 10
-    concurrent_writers: int = 10
+    concurrent_writers: int = 1  # Always 1 writer to avoid concurrency issues (not configurable)
     voyage_tier: int = 1  # Voyage AI tier (1, 2, or 3)
     voyage_concurrent_requests: int = 5  # For Voyage AI API rate limiting
     voyage_max_retries: int = 3  # Max retries for rate-limited requests
@@ -32,15 +37,31 @@ class BreezeConfig:
     # Indexing settings
     code_extensions: List[str] = None
     exclude_patterns: List[str] = None
+    batch_size: Optional[int] = None  # Batch size for embedding generation
 
     # Search settings
     default_limit: int = 10
     min_relevance: float = 0.0
 
+    # Reranker settings
+    reranker_model: Optional[str] = None  # From env: BREEZE_RERANKER_MODEL
+    reranker_api_key: Optional[str] = None  # From env: BREEZE_RERANKER_API_KEY
+
+    # File watcher settings
+    file_watcher_debounce_seconds: float = 2.0  # Debounce time for file change events
+
+
     def __post_init__(self):
         # Set platform-specific data directory if not provided
         if self.data_root is None:
             self.data_root = platformdirs.user_data_dir("breeze", "breeze-mcp")
+
+        # Load reranker settings from environment if not set
+        if self.reranker_model is None:
+            self.reranker_model = os.environ.get("BREEZE_RERANKER_MODEL")
+
+        if self.reranker_api_key is None:
+            self.reranker_api_key = os.environ.get("BREEZE_RERANKER_API_KEY")
 
         # Auto-detect best available device if not set
         if self.embedding_device == "cpu":
@@ -56,7 +77,7 @@ class BreezeConfig:
         base_requests_per_minute = 2000
         tier_multipliers = {1: 1, 2: 2, 3: 3}
         max_requests_per_minute = base_requests_per_minute * tier_multipliers[self.voyage_tier]
-        
+
         # Very conservative calculation to avoid rate limits
         # For tier 1, be extra conservative since that's where most users are
         if self.voyage_tier == 1:
@@ -65,7 +86,7 @@ class BreezeConfig:
         else:
             # For higher tiers, use 50% of rate limit / 20
             calculated_concurrent = int((max_requests_per_minute * 0.5) / 20)
-        
+
         # If voyage_concurrent_requests not explicitly set, use calculated value
         # Cap at reasonable limits: min 5, max 30
         if self.voyage_concurrent_requests == 5:  # Default value
@@ -177,16 +198,16 @@ class BreezeConfig:
 
     def get_voyage_rate_limits(self):
         """Get rate limits for the configured Voyage AI tier.
-        
+
         Returns:
             dict: Contains 'tokens_per_minute' and 'requests_per_minute'
         """
         base_tokens = 3_000_000  # 3M tokens per minute for tier 1
         base_requests = 2000     # 2000 requests per minute for tier 1
-        
+
         tier_multipliers = {1: 1, 2: 2, 3: 3}
         multiplier = tier_multipliers.get(self.voyage_tier, 1)
-        
+
         return {
             'tokens_per_minute': base_tokens * multiplier,
             'requests_per_minute': base_requests * multiplier,
@@ -207,3 +228,39 @@ class BreezeConfig:
         except ImportError:
             pass
         return "cpu"
+
+    def get_reranker_model(self) -> str:
+        """Get the reranker model to use based on config or embedding model."""
+        if self.reranker_model:
+            return self.reranker_model
+
+        # Default reranker models based on embedding model type
+        default_reranker_map = {
+            'voyage-': 'rerank-2',  # Voyage AI's reranker
+            'models/': 'models/gemini-2.0-flash-lite',  # Gemini reranker
+            'default': 'BAAI/bge-reranker-v2-m3'  # Local reranker for everything else
+        }
+
+        # Auto-select based on embedding model
+        if self.embedding_model.startswith('voyage-'):
+            return default_reranker_map['voyage-']
+        elif self.embedding_model.startswith('models/') or self.embedding_model.startswith('gemini-'):
+            return default_reranker_map['models/']
+        else:
+            return default_reranker_map['default']
+
+    def get_batch_size(self) -> int:
+        """Get the appropriate batch size for embedding generation."""
+        if self.batch_size is not None:
+            return self.batch_size
+
+        # Default batch sizes based on model type
+        if self.embedding_model.startswith('voyage-'):
+            # Smaller batches for Voyage AI due to token limits
+            return 20
+        elif self.embedding_model.startswith('models/'):
+            # Medium batches for Gemini models
+            return 50
+        else:
+            # Larger batches for local models
+            return 100

@@ -7,19 +7,28 @@ from pathlib import Path
 
 from breeze.core.engine import BreezeEngine
 from breeze.core.config import BreezeConfig
+from lancedb.embeddings.registry import get_registry
 
 
 @pytest.mark.asyncio
 async def test_file_watcher_content_detection():
     """Test that file watcher uses content detection instead of file extensions."""
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Import and use registered mock embedder
+        from .mock_embedders import RegisteredMockLocalEmbedder
+        registry = get_registry()
+        mock_embedder = registry.get("mock-local").create()
+        
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_content_detection",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=mock_embedder,
+            file_watcher_debounce_seconds=0.1,  # Very short debounce for fast tests
         )
         
         engine = BreezeEngine(config)
+        from .mock_embedders import MockReranker
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create test directory
@@ -65,8 +74,8 @@ async def test_file_watcher_content_detection():
             else:
                 file_path.write_text(content)
         
-        # Wait for file watcher to process
-        await asyncio.sleep(3)
+        # Wait for file watcher to process and trigger indexing (debounce + buffer)
+        await asyncio.sleep(0.3)
         
         # Check that an indexing event was triggered
         indexing_events = [e for e in events_received if e["type"] == "indexing_started"]
@@ -96,13 +105,20 @@ async def test_file_watcher_content_detection():
 async def test_direct_indexing_content_detection():
     """Test that direct indexing uses content detection."""
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Use registered mock embedder for fast testing
+        registry = get_registry()
+        mock_embedder = registry.get("mock-local").create()
+        
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_content_detection",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            embedding_function=mock_embedder,
+            file_watcher_debounce_seconds=0.1,  # Consistent with other test
         )
         
         engine = BreezeEngine(config)
+        from .mock_embedders import MockReranker
+        engine.reranker = MockReranker()
         await engine.initialize()
         
         # Create test files
@@ -128,7 +144,7 @@ async def test_direct_indexing_content_detection():
         assert stats.files_indexed >= 3  # Should index script, config.json, and README
         
         # Search for content to verify what was indexed
-        results = await engine.search("hello")
+        results = await engine.search("hello", use_reranker=False)
         assert len(results) > 0  # Should find the script file
         
         await engine.shutdown()

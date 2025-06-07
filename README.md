@@ -272,12 +272,14 @@ uv run python test_breeze.py
 **⚠️ LanceDB (the vector database used by Breeze) does not support concurrent writes from multiple processes.**
 
 This means:
+
 - You cannot run CLI indexing commands while the MCP server is running
 - Multiple Breeze instances cannot write to the same database simultaneously
 
-### Solutions:
+### Solutions
 
 1. **Stop the server before indexing via CLI:**
+
    ```bash
    # Stop server (if running)
    launchctl stop com.breeze-mcp.server  # macOS
@@ -401,11 +403,13 @@ This project has a Breeze MCP server configured for fast semantic code search.
 
 If working on this codebase long-term:
 ```
+
 register_project(
     name="MyProject",
     paths=["/path/to/project"],
     auto_index=true
 )
+
 ```
 
 This enables automatic re-indexing when files change, keeping search results current.

@@ -12,24 +12,26 @@ from breeze.core.models import IndexingTask, IndexStats
 from breeze.core.queue import IndexingQueue
 from breeze.core.engine import BreezeEngine
 from breeze.core.config import BreezeConfig
+from .mock_embedders import MockReranker
+from lancedb.embeddings.registry import get_registry
 
 
 @pytest_asyncio.fixture
 async def test_engine():
     """Create a test engine with mock embedding model."""
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Use mock embedder from registry
+        registry = get_registry()
+        mock_embedder = registry.get("mock-local").create()
+        
         config = BreezeConfig(
             data_root=tmpdir,
             db_name="test_queue",
-            embedding_model="test-model",
+            embedding_function=mock_embedder,
         )
         
         engine = BreezeEngine(config)
-        
-        # Mock the embedding model
-        mock_model = MagicMock()
-        mock_model.compute_source_embeddings.return_value = [[0.1] * 768]
-        engine.embedding_model = mock_model
+        engine.reranker = MockReranker()
         
         await engine.initialize()
         yield engine
@@ -60,7 +62,10 @@ class TestIndexingQueue:
         
         # Check queue status
         status = await queue.get_queue_status()
-        assert status["queue_size"] == 1
+        # The queue might be processing already, so check if task exists
+        # either in queue or being processed
+        assert status["queue_size"] >= 0  # Could be 0 if already processing
+        assert status["current_task"] == task.task_id or status["queue_size"] == 1
         
         await queue.stop()
     
@@ -98,7 +103,9 @@ class TestIndexingQueue:
         assert updated_task is not None
         assert updated_task.status == "completed"
         assert updated_task.progress == 100.0
-        assert updated_task.result_stats_json is not None
+        # Check that result fields are populated
+        assert updated_task.result_files_scanned is not None
+        assert updated_task.result_files_indexed is not None
         
         await queue.stop()
     

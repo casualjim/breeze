@@ -46,8 +46,12 @@
         <string>1</string>
         <key>VIRTUAL_ENV</key>
         <string>{{VIRTUAL_ENV}}</string>
+        <key>DISABLE_TQDM</key>
+        <string>1</string>
+        <key>HF_HUB_DISABLE_PROGRESS_BARS</key>
+        <string>1</string>
     </dict>
-    
+
     <key>StandardOutPath</key>
     <string>{{LOG_DIR}}/breeze-mcp.log</string>
     

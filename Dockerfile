@@ -1,16 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- Builder ----
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Install build deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+  build-essential \
+  curl &&
+  rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 ADD . /app
@@ -20,14 +20,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
   uv sync --no-dev --frozen
 
 # ---- Final ----
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS final
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS final
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+  curl &&
+  rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

@@ -26,6 +26,20 @@ engine: Optional[BreezeEngine] = None
 engine_lock = asyncio.Lock()
 
 
+async def shutdown_engine():
+    """Shutdown the global engine gracefully."""
+    global engine
+    if engine:
+        logger.info("Shutting down engine...")
+        try:
+            await engine.shutdown()
+        except Exception as e:
+            logger.error(f"Error during engine shutdown: {e}")
+        finally:
+            engine = None
+        logger.info("Engine shutdown complete")
+
+
 async def get_engine() -> BreezeEngine:
     """Get or create the global engine instance."""
     global engine
@@ -53,9 +67,7 @@ async def get_engine() -> BreezeEngine:
                 concurrent_embedders=int(
                     os.environ.get("BREEZE_CONCURRENT_EMBEDDERS", "10")
                 ),
-                concurrent_writers=int(
-                    os.environ.get("BREEZE_CONCURRENT_WRITERS", "10")
-                ),
+                # concurrent_writers is always 1 (hardcoded in BreezeConfig)
                 voyage_concurrent_requests=int(
                     os.environ.get("BREEZE_VOYAGE_CONCURRENT_REQUESTS", "5")
                 ),
@@ -393,6 +405,8 @@ async def unregister_project(project_id: str, ctx: Context = None) -> Dict[str, 
         return {"status": "error", "message": str(e)}
 
 
+
+
 @mcp.tool()
 async def list_projects(ctx: Context = None) -> Dict[str, Any]:
     """
@@ -650,9 +664,7 @@ def create_app():
                 yield
 
         logger.info("Shutting down Breeze MCP server...")
-        global engine
-        if engine:
-            await engine.shutdown()
+        await shutdown_engine()
 
     # Create Starlette app with combined lifespan
     app = Starlette(

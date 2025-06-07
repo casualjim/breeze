@@ -169,6 +169,7 @@ Stop watching and unregister a project.
 }
 ```
 
+
 ### list_projects
 
 List all registered projects with their status.

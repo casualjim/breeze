@@ -25,7 +25,10 @@
       "mcp__breeze__get_index_stats",
       "mcp__docs-mcp__list_doc_sources",
       "mcp__docs-mcp__fetch_docs",
-      "mcp__breeze__register_project"
+      "mcp__breeze__register_project",
+      "mcp__filesystem__read_file",
+      "mcp__filesystem__list_directory",
+      "mcp__zep__add_memory"
     ],
     "deny": []
   }

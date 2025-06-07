@@ -141,13 +141,6 @@ def index(
         min=1,
         max=100,
     ),
-    concurrent_writers: int = typer.Option(
-        int(os.getenv("BREEZE_CONCURRENT_WRITERS", "10")),
-        "--concurrent-writers",
-        help="Number of concurrent database writers (default: 10)",
-        min=1,
-        max=100,
-    ),
     model: Optional[str] = typer.Option(
         os.getenv(
             "BREEZE_EMBEDDING_MODEL", "ibm-granite/granite-embedding-125m-english"
@@ -193,7 +186,7 @@ def index(
         config_args = {
             "concurrent_readers": concurrent_readers,
             "concurrent_embedders": concurrent_embedders,
-            "concurrent_writers": concurrent_writers,
+            "concurrent_writers": 1,  # Always 1 writer to avoid concurrency issues
         }
         if model:
             config_args["embedding_model"] = model
@@ -217,7 +210,7 @@ def index(
             console.print(f"  • {d}")
 
         console.print(
-            f"[yellow]Using {concurrent_readers} file readers, {concurrent_embedders} embedders, {concurrent_writers} writers[/yellow]"
+            f"[yellow]Using {concurrent_readers} file readers, {concurrent_embedders} embedders, 1 writer[/yellow]"
         )
         
         # Show Voyage tier info if using Voyage model
@@ -548,8 +541,9 @@ def serve(
     setup_logging(verbose)
 
     # Import here to avoid circular imports
-    from breeze.mcp.server import create_app
+    from breeze.mcp.server import create_app, shutdown_engine
     import uvicorn
+    import signal
 
     # Get host and port from args or environment
     host = host or os.environ.get("BREEZE_HOST", "127.0.0.1")
@@ -564,9 +558,39 @@ def serve(
     console.print()
     console.print("[dim]Press CTRL+C to stop[/dim]")
 
+    # Set up signal handlers for graceful shutdown
+    shutdown_requested = False
+    
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        if not shutdown_requested:
+            shutdown_requested = True
+            console.print("\n[yellow]Shutdown signal received. Shutting down gracefully...[/yellow]")
+            # Schedule shutdown in async context
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(shutdown_engine())
+            except RuntimeError:
+                # No event loop running, will shut down naturally
+                pass
+        else:
+            console.print("\n[red]Force shutdown requested[/red]")
+            sys.exit(1)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     # Create and run the app
     app = create_app()
-    uvicorn.run(app, host=host, port=port)
+    try:
+        uvicorn.run(app, host=host, port=port, log_config=None)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped[/yellow]")
+    finally:
+        # Ensure cleanup happens
+        asyncio.run(shutdown_engine())
 
 
 @app.command()

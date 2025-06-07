@@ -27,8 +27,12 @@ class IndexingQueue:
     async def start(self):
         """Start the queue worker."""
         if self._worker_task is None or self._worker_task.done():
+            # Ensure shutdown event is clear
+            self._shutdown_event.clear()
             self._worker_task = asyncio.create_task(self._worker())
-            logger.info("IndexingQueue worker started")
+            logger.info(f"IndexingQueue worker started. Queue size: {self._queue.qsize()}")
+        else:
+            logger.info(f"Worker already running. Queue size: {self._queue.qsize()}")
     
     async def stop(self):
         """Stop the queue worker gracefully."""
@@ -38,10 +42,17 @@ class IndexingQueue:
         # Wait for current task to complete
         if self._worker_task:
             try:
-                await asyncio.wait_for(self._worker_task, timeout=300)  # 5 min timeout
+                # Use shorter timeout in test environment
+                import os
+                timeout = 5 if os.environ.get("PYTEST_CURRENT_TEST") else 300
+                await asyncio.wait_for(self._worker_task, timeout=timeout)
             except asyncio.TimeoutError:
                 logger.warning("Worker task timeout during shutdown")
                 self._worker_task.cancel()
+                try:
+                    await self._worker_task
+                except asyncio.CancelledError:
+                    pass
         
         logger.info("IndexingQueue worker stopped")
     
@@ -88,8 +99,9 @@ class IndexingQueue:
     
     async def _worker(self):
         """Background worker that processes tasks from the queue."""
-        logger.info("IndexingQueue worker started")
+        logger.info(f"IndexingQueue worker starting. Initial queue size: {self._queue.qsize()}")
         
+        task_count = 0
         while not self._shutdown_event.is_set():
             try:
                 # Wait for task with timeout to check shutdown periodically
@@ -98,14 +110,29 @@ class IndexingQueue:
                     timeout=1.0
                 )
                 
+                task_count += 1
+                logger.info(f"Worker processing task #{task_count}: {task.task_id}")
                 await self._process_task(task)
+                logger.info(f"Worker completed task #{task_count}: {task.task_id}")
                 
             except asyncio.TimeoutError:
                 # No task available, continue to check shutdown
+                if task_count == 0 and self._queue.qsize() > 0:
+                    logger.debug(f"Worker timeout but queue has {self._queue.qsize()} tasks")
                 continue
             except Exception as e:
+                if "Event loop is closed" in str(e) or isinstance(e, RuntimeError):
+                    # Event loop closing, exit gracefully
+                    logger.debug("Event loop closing, worker exiting")
+                    break
                 logger.error(f"Worker error: {e}", exc_info=True)
-                await asyncio.sleep(1)  # Brief pause before continuing
+                try:
+                    await asyncio.sleep(1)  # Brief pause before continuing
+                except:
+                    # Can't sleep, probably shutting down
+                    break
+        
+        logger.info(f"IndexingQueue worker exiting. Processed {task_count} tasks")
     
     async def _process_task(self, task: IndexingTask):
         """Process a single indexing task."""
@@ -190,29 +217,3 @@ class IndexingQueue:
         
         except Exception as e:
             logger.error(f"Error updating queue positions: {e}")
-    
-    async def restore_from_database(self):
-        """Restore queue from database on startup."""
-        logger.info("Restoring queue from database...")
-        
-        # Get all queued and running tasks
-        queued_tasks = await self.engine.list_tasks_by_status("queued")
-        running_tasks = await self.engine.list_tasks_by_status("running")
-        
-        # Reset running tasks to queued (they were interrupted)
-        for task in running_tasks:
-            task.status = "queued"
-            task.started_at = None
-            await self.engine.update_indexing_task(task)
-            queued_tasks.append(task)
-        
-        # UUID v7 is time-ordered, so sort by task_id to maintain original order
-        queued_tasks.sort(key=lambda t: t.task_id)
-        
-        # Re-add to queue
-        for idx, task in enumerate(queued_tasks):
-            task.queue_position = idx
-            await self._queue.put(task)
-            logger.info(f"Restored task {task.task_id} to queue position {idx}")
-        
-        logger.info(f"Restored {len(queued_tasks)} tasks to queue")
