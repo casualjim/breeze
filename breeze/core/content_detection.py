@@ -1,24 +1,26 @@
-"""Content type detection for code files using identify and libmagic."""
+"""Content type detection for code files using breeze-langdetect (hyperpolyglot)."""
 
 import logging
 from pathlib import Path
-from typing import Optional, List, Set
+from typing import Optional, List
 
-try:
-    from identify import identify
-except ImportError:
-    raise ImportError("Please install identify: pip install identify")
-
-try:
-    import magic
-except ImportError:
-    raise ImportError("Please install python-magic: pip install python-magic")
+import breeze_langdetect
 
 logger = logging.getLogger(__name__)
 
+# File categories that should not be indexed (binary files)
+BINARY_CATEGORIES = [
+    breeze_langdetect.FileCategory.IMAGE,
+    breeze_langdetect.FileCategory.VIDEO,
+    breeze_langdetect.FileCategory.AUDIO,
+    breeze_langdetect.FileCategory.ARCHIVE,
+    breeze_langdetect.FileCategory.FONT,
+    breeze_langdetect.FileCategory.APPLICATION,  # executables
+]
+
 
 class ContentDetector:
-    """Detects whether files contain code using identify and libmagic."""
+    """Detects whether files contain code using breeze-langdetect (hyperpolyglot)."""
 
     def __init__(self, exclude_patterns: Optional[List[str]] = None):
         """
@@ -28,21 +30,6 @@ class ContentDetector:
             exclude_patterns: List of patterns to exclude from indexing
         """
         self.exclude_patterns = exclude_patterns or []
-        self._magic = None
-        self._init_magic()
-
-    def _init_magic(self):
-        """Initialize libmagic for MIME type detection."""
-        try:
-            self._magic = magic.Magic(mime=True)
-        except Exception as e:
-            raise RuntimeError(
-                "python-magic requires libmagic to be installed.\n"
-                "  macOS: brew install libmagic\n"
-                "  Ubuntu/Debian: sudo apt-get install libmagic1\n"
-                "  RHEL/CentOS: sudo yum install file-devel\n"
-                f"Actual error: {e}"
-            )
 
     def should_index_file(self, file_path: Path) -> bool:
         """
@@ -60,61 +47,38 @@ class ContentDetector:
             if pattern in path_str:
                 return False
 
-        try:
-            # First try identify for known file types
-            tags = identify.tags_from_path(str(file_path))
+        # Basic checks
+        if not file_path.exists() or not file_path.is_file():
+            return False
 
-            # Skip if explicitly marked as binary
-            if "binary" in tags:
+        # Skip hidden files
+        if file_path.name.startswith('.'):
+            return False
+
+        # Use breeze-langdetect to detect file info
+        try:
+            file_info = breeze_langdetect.detect_file_info(str(file_path))
+            
+            # Skip binary files
+            if file_info.file_type and file_info.file_type.category in BINARY_CATEGORIES:
+                logger.debug(f"Skipping binary file {file_path}: {file_info.file_type.category}")
                 return False
-
-            # If it has 'text' tag or any programming language tag, index it
-            if "text" in tags or any(
-                tag for tag in tags if tag not in {"binary", "executable"}
-            ):
+            
+            # Index if we detected a programming language
+            if file_info.language:
                 return True
+                
+            # Also index plain text files (but not binary)
+            if file_info.file_type and file_info.file_type.category == breeze_langdetect.FileCategory.TEXT:
+                return True
+                
+            # Skip files we can't identify
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Error detecting file info for {file_path}: {e}")
+            return False
 
-            # For files without clear tags, use python-magic
-            try:
-                mime = self._magic.from_file(str(file_path))
-                # Index text files, source code, config files, etc.
-                if mime.startswith("text/") or mime in {
-                    "application/json",
-                    "application/xml",
-                    "application/x-yaml",
-                    "application/javascript",
-                    "application/x-python-code",
-                    "application/x-ruby",
-                    "application/x-sh",
-                    "application/x-csh",
-                    "application/x-shellscript",
-                    "application/x-latex",
-                    "application/x-tcl",
-                    "application/x-tex",
-                }:
-                    return True
-            except (OSError, IOError):
-                pass
-
-        except Exception:
-            pass
-
-        return False
-
-    def get_file_tags(self, file_path: Path) -> Set[str]:
-        """
-        Get identify tags for a file.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            Set of tags from identify
-        """
-        try:
-            return identify.tags_from_path(str(file_path))
-        except Exception:
-            return set()
     
     def detect_language(self, file_path: Path) -> Optional[str]:
         """
@@ -126,56 +90,40 @@ class ContentDetector:
         Returns:
             Detected language name suitable for tree-sitter, or None
         """
-        tags = self.get_file_tags(file_path)
-        
-        # Map identify tags to tree-sitter language names
-        language_map = {
-            'python': 'python',
-            'javascript': 'javascript',
-            'jsx': 'jsx',
-            'typescript': 'typescript',
-            'tsx': 'tsx',
-            'java': 'java',
-            'c++': 'cpp',
-            'c': 'c',
-            'c#': 'c_sharp',
-            'go': 'go',
-            'rust': 'rust',
-            'ruby': 'ruby',
-            'php': 'php',
-            'swift': 'swift',
-            'kotlin': 'kotlin',
-            'scala': 'scala',
-            'r': 'r',
-            'lua': 'lua',
-            'dart': 'dart',
-            'bash': 'bash',
-            'shell': 'bash',
-            'sh': 'bash',
-            'json': 'json',
-            'yaml': 'yaml',
-            'toml': 'toml',
-            'xml': 'xml',
-            'html': 'html',
-            'css': 'css',
-            'scss': 'scss',
-            'sql': 'sql',
-            'markdown': 'markdown',
-            'vim': 'vim',
-            'elisp': 'elisp',
-            'clojure': 'clojure',
-            'elixir': 'elixir',
-            'haskell': 'haskell',
-            'julia': 'julia',
-            'ocaml': 'ocaml',
-            'perl': 'perl',
-            'racket': 'racket',
-            'zig': 'zig',
-        }
-        
-        # Check tags for language matches
-        for tag in tags:
-            if tag in language_map:
-                return language_map[tag]
-        
-        return None
+        try:
+            file_info = breeze_langdetect.detect_file_info(str(file_path))
+            
+            # Skip binary files
+            if file_info.file_type and file_info.file_type.category in BINARY_CATEGORIES:
+                return None
+            
+            # Return the detected language
+            if file_info.language:
+                # Map hyperpolyglot names to tree-sitter names
+                # This is a much smaller mapping since hyperpolyglot
+                # already knows about most languages
+                hp_to_ts_mapping = {
+                    'C++': 'cpp',
+                    'C#': 'csharp',
+                    'F#': 'fsharp',
+                    'F*': 'fstar',
+                    'Objective-C': 'objc',
+                    'Objective-C++': 'objcpp',
+                    'Shell': 'bash',
+                    'Vim Script': 'vim',
+                    'Vim script': 'vim',
+                    'Emacs Lisp': 'elisp',
+                    'Common Lisp': 'commonlisp',
+                    'reStructuredText': 'rst',
+                }
+                return hp_to_ts_mapping.get(file_info.language, file_info.language.lower())
+            
+            # For plain text files without a specific language, return "text"
+            if file_info.file_type and file_info.file_type.category == breeze_langdetect.FileCategory.TEXT:
+                return "text"
+                
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error detecting language for {file_path}: {e}")
+            return None

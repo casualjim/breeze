@@ -28,7 +28,8 @@
       "mcp__breeze__register_project",
       "mcp__filesystem__read_file",
       "mcp__filesystem__list_directory",
-      "mcp__zep__add_memory"
+      "mcp__zep__add_memory",
+      "mcp__github__get_file_contents"
     ],
     "deny": []
   }

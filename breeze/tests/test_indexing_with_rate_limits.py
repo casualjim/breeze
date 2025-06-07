@@ -76,32 +76,35 @@ async def test_indexing_continues_with_rate_limits():
                     call_count += 1
                     print(f"Mock embeddings function called! Call count: {call_count}")
 
-                    texts = args[0]
+                    from breeze.core.embeddings import VoyageEmbeddingResult
+                    from breeze.core.text_chunker import FileContent, ChunkedFile
+
+                    file_contents = args[0]
 
                     # Simulate some batches failing due to rate limits
                     if call_count in [2, 4]:  # Fail batches 2 and 4 to show partial success
                         print(f"Simulating failure for call {call_count}")
                         # Return partial failure
-                        return {
-                            "embeddings": np.array(
-                                []
-                            ),  # No embeddings for failed batch
-                            "successful_batches": [],
-                            "failed_batches": [0],  # Single batch failed
-                            "texts": texts,
-                            "safe_batches": [texts],
-                        }
+                        return VoyageEmbeddingResult(
+                            embeddings=np.array([]),  # No embeddings for failed batch
+                            successful_files=[],
+                            failed_files=list(range(len(file_contents))),  # All files in batch failed
+                            chunked_files=[ChunkedFile(source=fc, chunks=[]) for fc in file_contents],
+                            safe_batches=[[fc.content for fc in file_contents]],
+                            failed_batches=[0]  # Mark batch as failed
+                        )
                     else:
                         print(f"Simulating success for call {call_count}")
-                        # Success - use len(texts) directly
+                        # Success - use len(file_contents) directly
                         # voyage-code-3 uses 1024 dimensions
-                        return {
-                            "embeddings": np.random.rand(len(texts), 1024),
-                            "successful_batches": [0],
-                            "failed_batches": [],
-                            "texts": texts,
-                            "safe_batches": [texts],
-                        }
+                        return VoyageEmbeddingResult(
+                            embeddings=np.random.rand(len(file_contents), 1024),
+                            successful_files=list(range(len(file_contents))),
+                            failed_files=[],
+                            chunked_files=[ChunkedFile(source=fc, chunks=[]) for fc in file_contents],
+                            safe_batches=[[fc.content for fc in file_contents]],
+                            failed_batches=[]  # No failed batches
+                        )
 
                 mock_get_embeddings.side_effect = mock_embeddings_func
 

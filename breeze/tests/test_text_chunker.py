@@ -4,7 +4,7 @@ import pytest
 import numpy as np
 from unittest.mock import Mock
 from breeze.core.text_chunker import (
-    TextChunker, ChunkingConfig, TextChunk, create_batches_from_chunks
+    TextChunker, ChunkingConfig, TextChunk, FileContent, ChunkedFile, create_batches_from_chunked_files
 )
 
 
@@ -16,12 +16,13 @@ class TestTextChunker:
         chunker = TextChunker(config=ChunkingConfig(max_tokens=1000))
         
         short_text = "def hello(): return 'world'"
-        chunks = chunker.chunk_text(short_text)
+        file_content = FileContent(content=short_text, file_path="test.py", language="python")
+        result = chunker.chunk_file(file_content)
         
-        assert len(chunks) == 1
-        assert chunks[0].text == short_text
-        assert chunks[0].chunk_index == 0
-        assert chunks[0].total_chunks == 1
+        assert len(result.chunks) == 1
+        assert result.chunks[0].text == short_text
+        assert result.chunks[0].chunk_index == 0
+        assert result.chunks[0].total_chunks == 1
         
     def test_long_text_multiple_chunks(self):
         """Test that long texts are split into multiple overlapping chunks."""
@@ -33,16 +34,17 @@ class TestTextChunker:
         
         # Create text that's definitely longer than 100 tokens (~400 chars)
         long_text = "x" * 1000
-        chunks = chunker.chunk_text(long_text)
+        file_content = FileContent(content=long_text, file_path="test.txt", language="text")
+        result = chunker.chunk_file(file_content)
         
-        assert len(chunks) > 1
-        assert all(chunk.total_chunks == len(chunks) for chunk in chunks)
+        assert len(result.chunks) > 1
+        assert all(chunk.total_chunks == len(result.chunks) for chunk in result.chunks)
         
         # Check overlap exists
-        for i in range(len(chunks) - 1):
+        for i in range(len(result.chunks) - 1):
             # There should be some overlap between consecutive chunks
-            chunk1_end = chunks[i].text[-50:]  # Last 50 chars
-            chunk2_start = chunks[i + 1].text[:50]  # First 50 chars
+            chunk1_end = result.chunks[i].text[-50:]  # Last 50 chars
+            chunk2_start = result.chunks[i + 1].text[:50]  # First 50 chars
             # At least some characters should match
             assert any(c in chunk2_start for c in chunk1_end[-10:])
     
@@ -51,10 +53,12 @@ class TestTextChunker:
         # Mock tokenizer
         mock_tokenizer = Mock()
         
-        # Mock encode to return list of token IDs
+        # Mock encode to return object with ids attribute
         def mock_encode(text, add_special_tokens=True):
+            result = Mock()
             # Simulate ~4 chars per token
-            return list(range(len(text) // 4))
+            result.ids = list(range(len(text) // 4))
+            return result
         
         # Mock decode to return a portion of original text
         def mock_decode(token_ids, skip_special_tokens=True):
@@ -71,10 +75,11 @@ class TestTextChunker:
         
         # Text with ~500 tokens
         long_text = "x" * 2000
-        chunks = chunker.chunk_text(long_text)
+        file_content = FileContent(content=long_text, file_path="test.txt", language="text")
+        result = chunker.chunk_file(file_content)
         
         # Should create multiple chunks
-        assert len(chunks) > 1
+        assert len(result.chunks) > 1
         
         # Tokenizer should be called
         assert mock_tokenizer.encode.called
@@ -86,13 +91,14 @@ class TestTextChunker:
         
         # Text with clear sentence boundaries
         text = "This is the first sentence with some words. This is the second sentence with more words. And here is the third sentence."
-        chunks = chunker.chunk_text(text)
+        file_content = FileContent(content=text, file_path="test.txt", language="text")
+        result = chunker.chunk_file(file_content)
         
         # Should have multiple chunks given the token limit
-        assert len(chunks) >= 2
+        assert len(result.chunks) >= 2
         
         # Verify chunks don't cut words in half (basic check)
-        for chunk in chunks:
+        for chunk in result.chunks:
             # Check that chunk starts and ends with complete words (not mid-word)
             if chunk.chunk_index > 0:  # Not first chunk
                 assert chunk.text[0].isspace() or chunk.text[0].isalpha()
@@ -102,8 +108,9 @@ class TestTextChunker:
     def test_empty_text(self):
         """Test handling of empty text."""
         chunker = TextChunker()
-        chunks = chunker.chunk_text("")
-        assert chunks == []
+        file_content = FileContent(content="", file_path="empty.txt", language="text")
+        result = chunker.chunk_file(file_content)
+        assert result.chunks == []
         
     def test_combine_embeddings_average(self):
         """Test combining embeddings with average method."""
@@ -155,27 +162,36 @@ class TestTextChunker:
         
     def test_create_batches_from_chunks(self):
         """Test batch creation from chunks."""
-        # Create chunks for 3 texts
-        chunks_per_text = [
-            [TextChunk(f"text0_chunk{i}", 0, 10, i, 2, 10) for i in range(2)],
-            [TextChunk(f"text1_chunk{i}", 0, 10, i, 3, 10) for i in range(3)],
-            [TextChunk(f"text2_chunk{i}", 0, 10, i, 1, 10) for i in range(1)],
+        # Create chunked files
+        chunked_files = [
+            ChunkedFile(
+                source=FileContent("text0", "file0.txt", "text"),
+                chunks=[TextChunk(f"text0_chunk{i}", 0, 10, i, 2, 10) for i in range(2)]
+            ),
+            ChunkedFile(
+                source=FileContent("text1", "file1.txt", "text"),
+                chunks=[TextChunk(f"text1_chunk{i}", 0, 10, i, 3, 10) for i in range(3)]
+            ),
+            ChunkedFile(
+                source=FileContent("text2", "file2.txt", "text"),
+                chunks=[TextChunk(f"text2_chunk{i}", 0, 10, i, 1, 10) for i in range(1)]
+            ),
         ]
         
         # Create batches with size 2
-        batches = create_batches_from_chunks(chunks_per_text, batch_size=2)
+        batches = create_batches_from_chunked_files(chunked_files, batch_size=2)
         
         # Should have 3 batches: [2 chunks], [2 chunks], [2 chunks]
         assert len(batches) == 3
         
-        # Check first batch
+        # Check first batch - each item is (file_idx, file_content, chunk)
         assert len(batches[0]) == 2
-        assert batches[0][0][0] == 0  # From text 0
-        assert batches[0][1][0] == 0  # From text 0
+        assert batches[0][0][0] == 0  # From file 0
+        assert batches[0][1][0] == 0  # From file 0
         
         # Check that all chunks are included
         total_chunks = sum(len(batch) for batch in batches)
-        expected_total = sum(len(chunks) for chunks in chunks_per_text)
+        expected_total = sum(len(cf.chunks) for cf in chunked_files)
         assert total_chunks == expected_total
         
     def test_chunking_config_defaults(self):

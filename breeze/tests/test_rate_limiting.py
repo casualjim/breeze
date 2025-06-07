@@ -59,19 +59,25 @@ class TestRateLimiting:
 
         mock_model.compute_source_embeddings = track_calls
 
+        from breeze.core.text_chunker import FileContent
+        
+        # Convert texts to FileContent objects
+        file_contents = [
+            FileContent(content=text, file_path=f"test{i}.txt", language="text")
+            for i, text in enumerate(texts)
+        ]
+        
         result = await get_voyage_embeddings_with_limits(
-            texts,
+            file_contents,
             mock_model,
             mock_tokenizer,
             max_concurrent_requests=5,
-            max_retries=3,
-            retry_base_delay=0.1,
             tokens_per_minute=tokens_per_minute,
             requests_per_minute=requests_per_minute,
         )
 
         # Check that we got all embeddings
-        assert len(result["embeddings"]) == 5
+        assert len(result.embeddings) == 5
 
         # Verify rate limiting occurred
         # With only 3 requests per minute allowed, we should see delays
@@ -96,7 +102,7 @@ class TestRateLimiting:
         # With MAX_TEXTS_PER_BATCH = 128, we need to create batches differently
         # Create very large texts that will each need their own batch due to token limits
         texts = []
-        for i in range(5):
+        for _ in range(5):
             # Each text is ~100k chars = ~25k tokens (with our mock tokenizer)
             # This approaches the MAX_TOKENS_PER_BATCH limit (120k)
             # So we'll get roughly 1 text per batch
@@ -123,24 +129,30 @@ class TestRateLimiting:
         mock_model = MagicMock()
         mock_model.compute_source_embeddings = mock_compute_embeddings
 
+        from breeze.core.text_chunker import FileContent
+        
+        # Convert texts to FileContent objects
+        file_contents = [
+            FileContent(content=text, file_path=f"test{i}.txt", language="text")
+            for i, text in enumerate(texts)
+        ]
+
         # Run with rate limiting - use high limits to avoid timeouts
         result = await get_voyage_embeddings_with_limits(
-            texts,
+            file_contents,
             mock_model,
             mock_tokenizer,
             max_concurrent_requests=5,  # Higher concurrency to ensure we hit the 3rd call
-            max_retries=3,
-            retry_base_delay=0.1,
             tokens_per_minute=10_000_000,  # Very high to avoid blocking
             requests_per_minute=100_000,  # Very high to avoid blocking
         )
 
         # Extract embeddings from result
-        embeddings = result["embeddings"]
+        embeddings = result.embeddings
 
         # Verify all texts were processed (or some failed)
-        # Since we have 10 texts and they're processed in batches, check if we got embeddings or failures
-        assert len(embeddings) > 0 or len(result["failed_batches"]) > 0
+        # Since we have 5 texts and they're processed in batches, check if we got embeddings or failures
+        assert len(embeddings) > 0 or len(result.failed_batches) > 0
 
         # Debug: print API call info
         print(f"API calls: {api_calls}")
@@ -176,20 +188,26 @@ class TestRateLimiting:
 
         mock_model.compute_source_embeddings = mock_compute_with_tracking
 
+        from breeze.core.text_chunker import FileContent
+        
+        # Convert texts to FileContent objects
+        file_contents = [
+            FileContent(content=text, file_path=f"test{i}.txt", language="text")
+            for i, text in enumerate(texts)
+        ]
+
         # Run with high concurrency
         result = await get_voyage_embeddings_with_limits(
-            texts,
+            file_contents,
             mock_model,
             mock_tokenizer,
             max_concurrent_requests=10,  # High concurrency
-            max_retries=3,
-            retry_base_delay=0.5,
             tokens_per_minute=10_000_000,  # Very high to avoid blocking
             requests_per_minute=100_000,  # Very high to avoid blocking
         )
 
         # Check all texts processed
-        assert len(result["embeddings"]) == 20
+        assert len(result.embeddings) == 20
 
         # Check that calls after rate limit respected the delay
         if rate_limit_time:
@@ -221,19 +239,25 @@ class TestRateLimiting:
         # Track embedding calls
         embedding_call_count = 0
 
-        async def mock_get_local_embeddings(*args, **kwargs):  # noqa: ARG001
+        async def mock_get_local_embeddings(*args, **kwargs):
             nonlocal embedding_call_count
             embedding_call_count += 1
-            texts = args[0]
-            return {
-                "embeddings": np.random.rand(
-                    len(texts), 384
+            from breeze.core.embeddings import EmbeddingResult
+            from breeze.core.text_chunker import TextChunker, ChunkingConfig
+            
+            file_contents = args[0]
+            # Create chunker for testing
+            chunker = TextChunker(config=ChunkingConfig(max_tokens=8192))
+            chunked_files = chunker.chunk_files(file_contents)
+            
+            return EmbeddingResult(
+                embeddings=np.random.rand(
+                    len(file_contents), 384
                 ),  # all-MiniLM-L6-v2 has 384 dims
-                "successful_batches": [0],
-                "failed_batches": [],
-                "texts": texts,
-                "safe_batches": [texts],
-            }
+                successful_files=list(range(len(file_contents))),
+                failed_files=[],
+                chunked_files=chunked_files
+            )
 
         # Create test files
         test_files = []
@@ -304,7 +328,7 @@ class TestRateLimiting:
         # With MAX_TOKENS_PER_BATCH = 120000 and MAX_TEXTS_PER_BATCH = 128
         # Create 5 groups of 100 texts each (under the 128 limit)
         texts = []
-        for i in range(5):
+        for _ in range(5):
             # Each group has texts that together are close to token limit
             # 100 texts * 1000 chars each = 100k chars = ~25k tokens per batch
             texts.extend(["x" * 1000 for _ in range(100)])
@@ -337,26 +361,32 @@ class TestRateLimiting:
         mock_model = MagicMock()
         mock_model.compute_source_embeddings = mock_compute_with_failures
 
+        from breeze.core.text_chunker import FileContent
+        
+        # Convert texts to FileContent objects
+        file_contents = [
+            FileContent(content=text, file_path=f"test{i}.txt", language="text")
+            for i, text in enumerate(texts)
+        ]
+
         # This should return partial results with failed batches
         # Use more reasonable rate limits to avoid timeout
         # Note: non-rate-limit errors are retried up to 3 times regardless of max_retries
         result = await get_voyage_embeddings_with_limits(
-            texts,
+            file_contents,
             mock_model,
             mock_tokenizer,
             max_concurrent_requests=1,  # Process sequentially to ensure predictable batch order
-            max_retries=3,  # This is for rate limit retries
-            retry_base_delay=0.01,
             tokens_per_minute=10_000_000,  # Very high to avoid rate limiting
             requests_per_minute=100_000,  # Very high to avoid rate limiting
         )
 
         # Check that some batches failed
-        assert len(result["failed_batches"]) > 0
-        # And some succeeded
-        assert len(result["successful_batches"]) > 0
+        assert len(result.failed_batches) > 0
+        # And some succeeded (check successful_files instead of successful_batches)
+        assert len(result.successful_files) > 0
         # We should have partial embeddings
-        assert len(result["embeddings"]) < len(texts)
+        assert len(result.embeddings) < len(file_contents)
 
     @pytest.mark.asyncio
     async def test_token_counting_accuracy(self, mock_tokenizer):
@@ -380,14 +410,20 @@ class TestRateLimiting:
         mock_model = MagicMock()
         mock_model.compute_source_embeddings = mock_compute_tracking_tokens
 
+        from breeze.core.text_chunker import FileContent
+        
+        # Convert texts to FileContent objects
+        file_contents = [
+            FileContent(content=text, file_path=f"test{i}.txt", language="text")
+            for i, text in enumerate(texts)
+        ]
+
         # Use high limits to avoid blocking
         result = await get_voyage_embeddings_with_limits(
-            texts,
+            file_contents,
             mock_model,
             mock_tokenizer,
             max_concurrent_requests=1,
-            max_retries=3,
-            retry_base_delay=0.01,
             tokens_per_minute=10_000_000,  # Very high to avoid blocking
             requests_per_minute=100_000,  # Very high to avoid blocking
         )
@@ -404,7 +440,7 @@ class TestRateLimiting:
             assert total_recorded_tokens == total_expected_tokens
 
             # Verify we got all embeddings
-            assert len(result["embeddings"]) == len(texts)
+            assert len(result.embeddings) == len(texts)
         else:
             # If no tokens were recorded, the embeddings must have been processed differently
-            assert len(result["embeddings"]) == len(texts)
+            assert len(result.embeddings) == len(texts)

@@ -9,26 +9,7 @@ from typing import Callable, Dict, List, Optional, Set
 import time
 import os
 
-try:
-    from identify import identify
-except ImportError:
-    raise ImportError("Please install identify: pip install identify")
-
-try:
-    import magic
-
-    # Test if libmagic is available
-    magic.Magic()
-except ImportError:
-    raise ImportError("Please install python-magic: pip install python-magic")
-except Exception as e:
-    raise RuntimeError(
-        "python-magic requires libmagic to be installed.\n"
-        "  macOS: brew install libmagic\n"
-        "  Ubuntu/Debian: sudo apt-get install libmagic1\n"
-        "  RHEL/CentOS: sudo yum install file-devel\n"
-        f"Actual error: {e}"
-    )
+# No longer need identify and magic - using breeze-langdetect via ContentDetector
 
 import aiofiles
 import aiofiles.os
@@ -787,48 +768,8 @@ class BreezeEngine:
 
     def _should_index_file(self, file_path: Path) -> bool:
         """Check if file should be indexed."""
-        # Check exclude patterns first
-        path_str = str(file_path)
-        for pattern in self.config.exclude_patterns:
-            if pattern in path_str:
-                return False
-
-        try:
-            # First try identify for known file types
-            tags = identify.tags_from_path(str(file_path))
-
-            # Skip if explicitly marked as binary
-            if "binary" in tags:
-                return False
-
-            # If it has 'text' tag or any programming language tag, index it
-            if "text" in tags or any(
-                tag for tag in tags if tag not in {"binary", "executable"}
-            ):
-                return True
-
-            # For files without clear tags, use python-magic
-            try:
-                mime = magic.from_file(str(file_path), mime=True)
-                # Index text files, source code, config files, etc.
-                if mime.startswith("text/") or mime in {
-                    "application/json",
-                    "application/xml",
-                    "application/x-yaml",
-                    "application/javascript",
-                    "application/x-python-code",
-                    "application/x-ruby",
-                    "application/x-sh",
-                    "application/x-shellscript",
-                }:
-                    return True
-            except (OSError, IOError):
-                pass
-
-        except Exception:
-            pass
-
-        return False
+        # Use ContentDetector which uses breeze-langdetect
+        return self.content_detector.should_index_file(file_path)
 
     def _walk_directory_fast(self, directory: Path) -> List[Path]:
         """Fast synchronous directory walk with filtering and gitignore support."""
@@ -888,19 +829,45 @@ class BreezeEngine:
                     async with embed_sem:
                         if doc_datas:
                             try:
-                                # Extract contents for embedding
-                                contents = [doc["content"] for doc in doc_datas]
+                                # Create FileContent objects for embedding
+                                from breeze.core.text_chunker import FileContent
+                                
+                                file_contents = []
+                                skipped_docs = []
+                                
+                                for doc in doc_datas:
+                                    # Detect language for the file
+                                    language = self.content_detector.detect_language(Path(doc["file_path"]))
+                                    if not language:
+                                        # Skip files where language detection fails (likely binary)
+                                        logger.debug(f"Skipping {doc['file_path']} - no language detected")
+                                        skipped_docs.append(doc)
+                                        continue
+                                    
+                                    file_contents.append(FileContent(
+                                        content=doc["content"],
+                                        file_path=doc["file_path"],
+                                        language=language
+                                    ))
+                                
+                                # Remove skipped docs from doc_datas
+                                doc_datas = [doc for doc in doc_datas if doc not in skipped_docs]
+                                
+                                if not file_contents:
+                                    # All files were skipped
+                                    continue
 
                                 # Generate embeddings based on model type
                                 # Check if this is a unittest mock (for testing)
                                 if type(self.embedding_model).__name__ in {'MagicMock', 'Mock'}:
                                     # Direct call for unittest mocks to avoid complex tokenization
+                                    contents = [fc.content for fc in file_contents]
                                     embeddings = self.embedding_model.compute_source_embeddings(contents)
                                 elif self.is_voyage_model:
                                     # Special handling for Voyage with token limits
                                     rate_limits = self.config.get_voyage_rate_limits()
                                     result = await get_voyage_embeddings_with_limits(
-                                        contents,
+                                        file_contents,
                                         self.embedding_model,
                                         self.tokenizer,
                                         self.config.voyage_concurrent_requests,
@@ -910,16 +877,16 @@ class BreezeEngine:
                                         rate_limits['requests_per_minute'],
                                     )
 
-                                    embeddings = result['embeddings']
+                                    embeddings = result.embeddings
 
                                     # Handle any failed batches
-                                    if result['failed_batches']:
+                                    if result.failed_batches:
                                         # Find which documents failed
                                         failed_indices = []
-                                        for failed_batch_idx in result['failed_batches']:
-                                            batch = result['safe_batches'][failed_batch_idx]
+                                        for failed_batch_idx in result.failed_batches:
+                                            batch = result.safe_batches[failed_batch_idx]
                                             # Find original indices of texts in the failed batch
-                                            start_idx = sum(len(result['safe_batches'][i]) for i in range(failed_batch_idx))
+                                            start_idx = sum(len(result.safe_batches[i]) for i in range(failed_batch_idx))
                                             for i in range(len(batch)):
                                                 failed_indices.append(start_idx + i)
 
@@ -947,7 +914,7 @@ class BreezeEngine:
                                 else:
                                     # Local model embedding generation with tokenizer-based chunking
                                     result = await get_local_embeddings_with_tokenizer_chunking(
-                                        contents,
+                                        file_contents,
                                         self.embedding_model,
                                         self.config.embedding_model,
                                         max_concurrent_requests=self.config.concurrent_embedders or 5,
@@ -956,18 +923,12 @@ class BreezeEngine:
                                         max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
                                     )
 
-                                    embeddings = result['embeddings']
+                                    embeddings = result.embeddings
 
-                                    # Handle any failed batches
-                                    if result['failed_batches']:
-                                        # Find which documents failed
-                                        failed_indices = []
-                                        for failed_batch_idx in result['failed_batches']:
-                                            batch = result['safe_batches'][failed_batch_idx]
-                                            # Find original indices of texts in the failed batch
-                                            start_idx = sum(len(result['safe_batches'][i]) for i in range(failed_batch_idx))
-                                            for i in range(len(batch)):
-                                                failed_indices.append(start_idx + i)
+                                    # Handle any failed files (local embedder returns 'failed_files')
+                                    if result.failed_files:
+                                        # The failed_files list contains indices of files that failed
+                                        failed_indices = result.failed_files
 
                                         # Separate successful and failed documents
                                         successful_doc_datas = [doc for i, doc in enumerate(doc_datas) if i not in failed_indices]
@@ -1569,10 +1530,10 @@ class BreezeEngine:
     async def _reset_interrupted_tasks(self):
         """Reset running tasks to queued status on startup."""
         try:
-            # Update running tasks to queued
+            # Update running tasks to queued and clear started_at
             # LanceDB update syntax: update(values, where)
             await self.indexing_tasks_table.update(
-                {"status": "queued"},
+                {"status": "queued", "started_at": None},
                 where="status = 'running'"
             )
         except Exception as e:

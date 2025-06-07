@@ -1,16 +1,35 @@
 """Embedding providers for Breeze, including custom Voyage AI support."""
 
 import os
-from typing import List, ClassVar
+from typing import List, ClassVar, Dict, Any, Optional
+from dataclasses import dataclass
 import numpy as np
 import pyarrow as pa
 import logging
 
 from lancedb.embeddings import EmbeddingFunction
 from lancedb.embeddings.registry import register
+from transformers import AutoTokenizer
 from breeze.core.rate_limiter import RateLimiterV2
+from breeze.core.text_chunker import TextChunker, ChunkingConfig, FileContent, ChunkedFile
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EmbeddingResult:
+    """Result from embedding generation."""
+    embeddings: np.ndarray  # Array of embeddings
+    successful_files: List[int]  # Indices of successfully embedded files
+    failed_files: List[int]  # Indices of failed files
+    chunked_files: List[ChunkedFile]  # Chunked file information
+    
+    
+@dataclass
+class VoyageEmbeddingResult(EmbeddingResult):
+    """Result from Voyage embedding generation with batch information."""
+    safe_batches: Optional[List[tuple]] = None  # Batches that were created
+    failed_batches: Optional[List[int]] = None  # Indices of batches that failed
 
 
 def sanitize_text_input(inputs) -> List[str]:
@@ -31,6 +50,9 @@ def sanitize_text_input(inputs) -> List[str]:
         raise ValueError("Each input should be str.")
 
     return inputs
+
+
+# Removed ModelAwareChunker - now using TextChunker from text_chunker.py
 
 
 @register("voyage-code-3")
@@ -102,11 +124,13 @@ class VoyageCode3EmbeddingFunction(EmbeddingFunction):
         return VoyageCode3EmbeddingFunction.client
 
 
-
 # Global rate limiter instance (shared across all calls)
 _voyage_rate_limiter = None
 
-def _get_rate_limiter(tokens_per_minute: int, requests_per_minute: int) -> RateLimiterV2:
+
+def _get_rate_limiter(
+    tokens_per_minute: int, requests_per_minute: int
+) -> RateLimiterV2:
     """Get or create the global rate limiter."""
     global _voyage_rate_limiter
     # Always create a new rate limiter with the provided values
@@ -117,116 +141,121 @@ def _get_rate_limiter(tokens_per_minute: int, requests_per_minute: int) -> RateL
 
 # Voyage token limit handling functions
 async def get_voyage_embeddings_with_limits(
-    texts,
-    model,
-    tokenizer=None,
+    file_contents: List[FileContent],
+    model: EmbeddingFunction,
+    tokenizer: AutoTokenizer | None = None,
     max_concurrent_requests=5,
-    max_retries=3,  # Kept for compatibility but we use time-based retries for rate limits
-    retry_base_delay=1.0,
     tokens_per_minute=3_000_000,
     requests_per_minute=2000,
     max_retry_duration=600,  # 10 minutes max retry time for rate limits
 ):
-    """Get embeddings from Voyage AI with proper token limit handling.
+    """Get embeddings from Voyage AI with proper token limit handling using TextChunker.
 
     Args:
-        texts: List of text strings to embed
+        file_contents: List of FileContent objects with content, path, and language
         model: The embedding model instance
         tokenizer: HuggingFace tokenizer instance (from tokenizers library)
         max_concurrent_requests: Maximum concurrent API requests
-        max_retries: Maximum number of retries for rate-limited requests
-        retry_base_delay: Base delay in seconds for exponential backoff
         tokens_per_minute: Token limit per minute based on tier
         requests_per_minute: Request limit per minute based on tier
+        max_retry_duration: Maximum time to retry rate-limited requests
 
-    Raises:
-        Exception: If embeddings cannot be generated after all retries
+    Returns:
+        Dictionary with embeddings and metadata
     """
     import asyncio
     import time
     import logging
-    
+
     logger = logging.getLogger(__name__)
 
     MAX_TOKENS_PER_BATCH = 120000  # Voyage's limit per request
     MAX_TEXTS_PER_BATCH = 128  # Voyage's limit per request
-    
+
     # Get the global rate limiter with 10% safety margin
     # This helps avoid hitting the actual API limits
     safe_tokens_per_minute = int(tokens_per_minute * 0.9)
     safe_requests_per_minute = int(requests_per_minute * 0.9)
     rate_limiter = _get_rate_limiter(safe_tokens_per_minute, safe_requests_per_minute)
-    
-    logger.debug(f"Rate limiter created with {safe_tokens_per_minute} tokens/min, {safe_requests_per_minute} requests/min")
-    
+
+    logger.debug(
+        f"Rate limiter created with {safe_tokens_per_minute} tokens/min, {safe_requests_per_minute} requests/min"
+    )
+
     # Track failed batches
     failed_batches = set()  # Track which batches failed
 
-    def estimate_tokens(text):
-        """Estimate tokens using tokenizer or character count."""
-        if tokenizer:
-            # For HuggingFace tokenizers
-            encoded = tokenizer.encode(text)
-            return len(encoded.ids)
-        else:
-            # Conservative estimate: ~3.5 chars per token
-            return int(len(text) / 3.5)
+    # Create chunker with 16k tokens (as per context.md)
+    # This is the sweet spot for code files
+    chunker = TextChunker(
+        tokenizer=tokenizer, config=ChunkingConfig(max_tokens=16384, overlap_tokens=256)
+    )
 
-    def create_safe_batches(texts):
-        """Create batches that respect Voyage's token and count limits."""
-        batches = []
-        current_batch = []
-        current_tokens = 0
+    # Chunk all file contents
+    chunked_files = chunker.chunk_files(file_contents)
 
-        for text in texts:
-            text_tokens = estimate_tokens(text)
+    # Log chunking info
+    total_chunks = sum(len(cf.chunks) for cf in chunked_files)
+    if total_chunks > len(file_contents):
+        logger.info(
+            f"Voyage AI: Chunked {len(file_contents)} files into {total_chunks} chunks"
+        )
 
-            # If single text exceeds limit, truncate it
-            if text_tokens > MAX_TOKENS_PER_BATCH:
-                max_chars = int(MAX_TOKENS_PER_BATCH * 3.5 * 0.8)
-                text = text[:max_chars]
-                text_tokens = estimate_tokens(text)
+    # Create batches that respect Voyage's limits
+    # We can fit ~7 chunks of 16k tokens in a 120k batch
+    all_chunks = []
+    chunk_to_file_idx = {}
 
-            # Check if adding this text would exceed limits
-            if current_batch and (
-                current_tokens + text_tokens
-                > MAX_TOKENS_PER_BATCH * 0.8  # 80% safety margin
-                or len(current_batch) >= MAX_TEXTS_PER_BATCH
-            ):
-                batches.append(current_batch)
-                current_batch = [text]
-                current_tokens = text_tokens
-            else:
-                current_batch.append(text)
-                current_tokens += text_tokens
-
-        if current_batch:
-            batches.append(current_batch)
-
-        return batches
+    for file_idx, chunked_file in enumerate(chunked_files):
+        for chunk in chunked_file.chunks:
+            chunk_idx = len(all_chunks)
+            all_chunks.append(chunk)
+            chunk_to_file_idx[chunk_idx] = file_idx
 
     # Create safe batches
-    safe_batches = create_safe_batches(texts)
+    safe_batches = []
+    current_batch = []
+    current_batch_indices = []
+    current_tokens = 0
+
+    for idx, chunk in enumerate(all_chunks):
+        chunk_tokens = chunk.estimated_tokens
+
+        # Check if adding this chunk would exceed limits
+        if current_batch and (
+            current_tokens + chunk_tokens
+            > MAX_TOKENS_PER_BATCH * 0.8  # 80% safety margin
+            or len(current_batch) >= MAX_TEXTS_PER_BATCH
+        ):
+            safe_batches.append((current_batch, current_batch_indices))
+            current_batch = [chunk.text]
+            current_batch_indices = [idx]
+            current_tokens = chunk_tokens
+        else:
+            current_batch.append(chunk.text)
+            current_batch_indices.append(idx)
+            current_tokens += chunk_tokens
+
+    if current_batch:
+        safe_batches.append((current_batch, current_batch_indices))
 
     # Log batching info
-    import logging
-
-    logger = logging.getLogger(__name__)
     if len(safe_batches) > 1:
         logger.info(
-            f"Voyage AI: Processing {len(texts)} texts in {len(safe_batches)} API calls (respecting token limits)"
+            f"Voyage AI: Processing {total_chunks} chunks in {len(safe_batches)} API calls"
         )
 
     # Semaphore to limit concurrent API calls
     semaphore = asyncio.Semaphore(max_concurrent_requests)
 
-    async def process_batch(batch_idx, batch):
+    async def process_batch(batch_idx, batch_data):
         """Process a single batch with the API."""
+        batch_texts, chunk_indices = batch_data
         logger = logging.getLogger(__name__)
-        
+
         # Calculate tokens in this batch
-        batch_tokens = sum(estimate_tokens(text) for text in batch)
-        
+        batch_tokens = sum(chunker.estimate_tokens(text) for text in batch_texts)
+
         # Track when we started trying this batch
         batch_start_time = time.time()
 
@@ -236,25 +265,23 @@ async def get_voyage_embeddings_with_limits(
                 # Check if we've been trying for too long (10 minutes)
                 if time.time() - batch_start_time > max_retry_duration:
                     failed_batches.add(batch_idx)
-                    error_msg = (
-                        f"Failed to process batch {batch_idx + 1} after {max_retry_duration}s of retries"
-                    )
+                    error_msg = f"Failed to process batch {batch_idx + 1} after {max_retry_duration}s of retries"
                     logger.error(error_msg)
                     raise Exception(error_msg)
-                
+
                 try:
                     # Use rate limiter context manager to hold tokens for entire operation
                     async with rate_limiter.acquire(batch_tokens, timeout=60):
                         logger.info(
                             f"Batch {batch_idx + 1}: Acquired {batch_tokens} tokens, making API call"
                         )
-                        
+
                         # Make the API call while holding the tokens
                         embeddings = await asyncio.to_thread(
-                            model.compute_source_embeddings, batch
+                            model.compute_source_embeddings, batch_texts
                         )
-                        return embeddings
-                        
+                        return embeddings, chunk_indices
+
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"Batch {batch_idx + 1}: Timeout waiting for rate limiter after 60s"
@@ -272,7 +299,7 @@ async def get_voyage_embeddings_with_limits(
                         # This means our limits are set too high
                         # Wait with exponential backoff
                         delay = min(30, max(5, 5 + (attempt * 5)))
-                        
+
                         logger.warning(
                             f"Rate limited on batch {batch_idx + 1} despite token bucket: {e}. "
                             f"Waiting {delay:.0f}s before retry (attempt {attempt + 1}). "
@@ -305,198 +332,205 @@ async def get_voyage_embeddings_with_limits(
     batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Check for failures and collect successful embeddings
-    all_embeddings = []
+    chunk_embeddings = {}  # Maps chunk index to embedding
     successful_batches = []
-    
+
     for idx, result in enumerate(batch_results):
         if isinstance(result, Exception):
             logger.error(f"Batch {idx} failed: {result}")
             failed_batches.add(idx)
         else:
-            all_embeddings.extend(result)
+            embeddings, chunk_indices = result
+            for i, chunk_idx in enumerate(chunk_indices):
+                chunk_embeddings[chunk_idx] = embeddings[i]
             successful_batches.append(idx)
 
+    # Combine chunk embeddings for each file
+    final_embeddings = []
+    successful_files = []
+    failed_files = []
+
+    for file_idx, chunked_file in enumerate(chunked_files):
+        # Collect embeddings for all chunks of this file
+        file_chunk_embeddings = []
+        all_chunks_found = True
+
+        # Find the global indices for this file's chunks
+        global_chunk_start = sum(len(cf.chunks) for cf in chunked_files[:file_idx])
+
+        for local_idx, chunk in enumerate(chunked_file.chunks):
+            global_idx = global_chunk_start + local_idx
+            if global_idx in chunk_embeddings:
+                file_chunk_embeddings.append(chunk_embeddings[global_idx])
+            else:
+                all_chunks_found = False
+                break
+
+        if all_chunks_found and file_chunk_embeddings:
+            # Combine chunk embeddings into a single embedding
+            if len(file_chunk_embeddings) == 1:
+                # Single chunk - use as is
+                combined_embedding = file_chunk_embeddings[0]
+            else:
+                # Multiple chunks - combine them
+                combined_embedding = chunker.combine_file_embeddings(
+                    chunked_file, file_chunk_embeddings, method="weighted_average"
+                )
+
+            final_embeddings.append(combined_embedding)
+            successful_files.append(file_idx)
+        else:
+            failed_files.append(file_idx)
+            logger.warning(f"Missing embeddings for file {file_idx}")
+
     # Always return results with metadata - let caller decide what to do with failures
-    if failed_batches:
-        total_count = len(safe_batches)
+    if failed_files:
+        total_count = len(file_contents)
         logger.warning(
-            f"Partially completed: {len(successful_batches)}/{total_count} batches succeeded. "
-            f"Failed batches: {sorted(failed_batches)}"
+            f"Partially completed: {len(successful_files)}/{total_count} files succeeded. "
+            f"Failed file indices: {failed_files}"
         )
-    
-    return {
-        'embeddings': np.array(all_embeddings) if all_embeddings else np.array([]),
-        'successful_batches': successful_batches,
-        'failed_batches': list(failed_batches),
-        'texts': texts,
-        'safe_batches': safe_batches
-    }
+
+    return VoyageEmbeddingResult(
+        embeddings=np.array(final_embeddings) if final_embeddings else np.array([]),
+        successful_files=successful_files,
+        failed_files=failed_files,
+        chunked_files=chunked_files,
+        safe_batches=safe_batches,
+        failed_batches=list(failed_batches) if failed_batches else []
+    )
 
 
 async def get_local_embeddings_with_tokenizer_chunking(
-    texts,
-    model,
-    model_name,
-    max_concurrent_requests=5,
-    max_retries=3,
-    retry_base_delay=1.0,
-    max_sequence_length=None,
-):
+    file_contents: List[FileContent],
+    model: EmbeddingFunction,
+    model_name: str,
+    max_concurrent_requests: int = 5,
+    max_retries: int = 3,
+    retry_base_delay: float = 1.0,
+    max_sequence_length: Optional[int] = None,
+) -> Dict[str, Any]:
     """Get embeddings from local models with proper tokenizer-based chunking.
-    
+
+    This function chunks long texts into overlapping segments, embeds each chunk,
+    and combines them into a single embedding per text.
+
     Args:
-        texts: List of text strings to embed
-        model: The embedding model instance
+        file_contents: List of FileContent objects with content, path, and language
+        model: The LanceDB embedding model instance
         model_name: Name of the model (e.g., 'BAAI/bge-m3')
         max_concurrent_requests: Maximum concurrent embedding operations
         max_retries: Maximum number of retries for failed embeddings
         retry_base_delay: Base delay in seconds for exponential backoff
         max_sequence_length: Override the model's max sequence length
-        
+
     Returns:
         Dictionary with embeddings and metadata
     """
     import asyncio
     import logging
-    
+    from breeze.core.text_chunker import create_batches_from_chunked_files
+
     logger = logging.getLogger(__name__)
-    
+
     # Try to load the tokenizer for the model
     tokenizer = None
-    actual_max_length = 512  # Conservative default
-    
+    actual_max_length = 8192  # Default to 8k tokens like before
+
     # Skip tokenizer loading for mock embedders
     # Check various ways a model could be a mock:
     # 1. Model name contains "mock"
     # 2. Type name starts with "Mock" or contains "Mock"
     # 3. Model is from the mock_embedders module
     is_mock = (
-        "mock" in model_name.lower() or 
-        type(model).__name__.startswith("Mock") or
-        "Mock" in type(model).__name__ or
-        model.__class__.__module__ == 'breeze.tests.mock_embedders'
+        "mock" in model_name.lower()
+        or type(model).__name__.startswith("Mock")
+        or "Mock" in type(model).__name__
+        or model.__class__.__module__ == "breeze.tests.mock_embedders"
     )
-    
+
     if is_mock:
-        logger.debug(f"Skipping tokenizer loading for mock embedder: {type(model).__name__}")
+        logger.debug(
+            f"Skipping tokenizer loading for mock embedder: {type(model).__name__}"
+        )
     else:
         try:
             from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-            
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=True
+            )
+
             # Get the actual max sequence length from the tokenizer/model
             if max_sequence_length:
                 actual_max_length = max_sequence_length
-            elif hasattr(tokenizer, 'model_max_length') and tokenizer.model_max_length < 1000000:
+            elif (
+                hasattr(tokenizer, "model_max_length")
+                and tokenizer.model_max_length < 1000000
+            ):
                 actual_max_length = tokenizer.model_max_length
-            elif hasattr(tokenizer, 'max_len'):
+            elif hasattr(tokenizer, "max_len"):
                 actual_max_length = tokenizer.max_len
             else:
                 # Try to get from model config if available
-                if hasattr(model, 'model') and hasattr(model.model, 'config'):
-                    if hasattr(model.model.config, 'max_position_embeddings'):
+                if hasattr(model, "model") and hasattr(model.model, "config"):
+                    if hasattr(model.model.config, "max_position_embeddings"):
                         actual_max_length = model.model.config.max_position_embeddings
-            
-            logger.info(f"Using tokenizer for {model_name} with max sequence length: {actual_max_length}")
+
+            logger.info(
+                f"Using tokenizer for {model_name} with max sequence length: {actual_max_length}"
+            )
         except Exception as e:
             logger.warning(f"Could not load tokenizer for {model_name}: {e}")
             logger.warning("Falling back to character-based estimation")
-    
-    # Track failed batches
-    failed_batches = set()
-    
-    def estimate_tokens(text):
-        """Estimate tokens using tokenizer or character count."""
-        if tokenizer:
-            try:
-                # Use tokenizer to get exact token count
-                encoded = tokenizer.encode(text, add_special_tokens=True, truncation=False)
-                return len(encoded)
-            except Exception as e:
-                logger.debug(f"Token encoding failed, using character fallback: {e}")
-        
-        # Conservative estimate: ~4 chars per token for code
-        return int(len(text) / 4)
-    
-    def create_safe_batches(texts):
-        """Create batches that respect the model's token limits."""
-        # Reserve tokens for special tokens ([CLS], [SEP], etc.)
-        reserved_tokens = 10  # Conservative reservation
-        max_tokens_per_text = actual_max_length - reserved_tokens
-        
-        batches = []
-        current_batch = []
-        
-        for idx, text in enumerate(texts):
-            text_tokens = estimate_tokens(text)
-            
-            # If single text exceeds limit, we need to truncate it
-            if text_tokens > max_tokens_per_text:
-                if tokenizer:
-                    try:
-                        # Use tokenizer to truncate properly
-                        encoded = tokenizer.encode(
-                            text, 
-                            add_special_tokens=True, 
-                            truncation=True, 
-                            max_length=actual_max_length,
-                            return_tensors=None
-                        )
-                        # Decode back to text (without special tokens)
-                        truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
-                        
-                        # Add truncation indicator
-                        text = truncated_text + "..."
-                        text_tokens = len(encoded)
-                        
-                        logger.debug(f"Truncated text from {estimate_tokens(texts[idx])} to {text_tokens} tokens")
-                    except Exception as e:
-                        logger.warning(f"Tokenizer truncation failed: {e}")
-                        # Fallback to character truncation
-                        max_chars = max_tokens_per_text * 4
-                        text = text[:max_chars] + "..."
-                        text_tokens = estimate_tokens(text)
-                else:
-                    # Character-based truncation
-                    max_chars = max_tokens_per_text * 4
-                    text = text[:max_chars] + "..."
-                    text_tokens = estimate_tokens(text)
-            
-            current_batch.append(text)
-        
-        # For local models, we can usually process multiple texts at once
-        # But let's be conservative and batch them reasonably
-        batch_size = 32  # Reasonable batch size for local models
-        
-        for i in range(0, len(current_batch), batch_size):
-            batches.append(current_batch[i:i + batch_size])
-        
-        return batches
-    
-    # Create safe batches
-    safe_batches = create_safe_batches(texts)
-    
-    # Log batching info
-    if len(safe_batches) > 1:
+
+    # Create chunker with the actual max length
+    chunker = TextChunker(
+        tokenizer=tokenizer, config=ChunkingConfig(max_tokens=actual_max_length)
+    )
+
+    # Chunk all file contents
+    chunked_files = chunker.chunk_files(file_contents)
+
+    # Log chunking info
+    total_chunks = sum(len(cf.chunks) for cf in chunked_files)
+    if total_chunks > len(file_contents):
         logger.info(
-            f"Local model: Processing {len(texts)} texts in {len(safe_batches)} batches"
+            f"Local model: Chunked {len(file_contents)} files into {total_chunks} chunks"
         )
-    
+
+    # Create batches from chunked files
+    batches = create_batches_from_chunked_files(chunked_files, batch_size=32)
+
+    # Track results
+    chunk_embeddings = {}  # Maps (file_idx, chunk_index) to embedding
+    failed_batches = set()
+
     # Semaphore to limit concurrent operations
     semaphore = asyncio.Semaphore(max_concurrent_requests)
-    
+
     async def process_batch(batch_idx, batch):
-        """Process a single batch with the model."""
+        """Process a single batch of chunks with the model."""
         async with semaphore:
             attempt = 0
             while attempt < max_retries:
                 try:
+                    # Extract chunk texts
+                    chunk_texts = [chunk.text for _, _, chunk in batch]
+
                     # Generate embeddings using asyncio.to_thread for CPU-bound operation
                     embeddings = await asyncio.to_thread(
-                        model.compute_source_embeddings, batch
+                        model.compute_source_embeddings, chunk_texts
                     )
-                    return embeddings
-                    
+
+                    # Store results mapped by file and chunk index
+                    results = []
+                    for i, (file_idx, file_content, chunk) in enumerate(batch):
+                        chunk_embeddings[(file_idx, chunk.chunk_index)] = embeddings[i]
+                        results.append((file_idx, chunk.chunk_index, embeddings[i]))
+
+                    return results
+
                 except Exception as e:
                     attempt += 1
                     if attempt < max_retries:
@@ -506,40 +540,72 @@ async def get_local_embeddings_with_tokenizer_chunking(
                         )
                         await asyncio.sleep(delay)
                     else:
-                        logger.error(f"Failed batch {batch_idx + 1} after {max_retries} attempts: {e}")
+                        logger.error(
+                            f"Failed batch {batch_idx + 1} after {max_retries} attempts: {e}"
+                        )
                         failed_batches.add(batch_idx)
                         raise
-    
+
     # Process all batches concurrently
-    tasks = [process_batch(idx, batch) for idx, batch in enumerate(safe_batches)]
-    
+    tasks = [process_batch(idx, batch) for idx, batch in enumerate(batches)]
+
     # Use gather with return_exceptions=True to handle failures gracefully
     batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Check for failures and collect successful embeddings
-    all_embeddings = []
-    successful_batches = []
-    
+
+    # Check for failures
+    successful_count = 0
     for idx, result in enumerate(batch_results):
         if isinstance(result, Exception):
             logger.error(f"Batch {idx} failed: {result}")
             failed_batches.add(idx)
         else:
-            all_embeddings.extend(result)
-            successful_batches.append(idx)
-    
+            successful_count += 1
+
+    # Combine chunk embeddings for each file
+    final_embeddings = []
+    successful_files = []
+    failed_files = []
+
+    for file_idx, chunked_file in enumerate(chunked_files):
+        # Collect embeddings for all chunks of this file
+        file_chunk_embeddings = []
+        all_chunks_found = True
+
+        for chunk in chunked_file.chunks:
+            key = (file_idx, chunk.chunk_index)
+            if key in chunk_embeddings:
+                file_chunk_embeddings.append(chunk_embeddings[key])
+            else:
+                all_chunks_found = False
+                break
+
+        if all_chunks_found and file_chunk_embeddings:
+            # Combine chunk embeddings into a single embedding
+            if len(file_chunk_embeddings) == 1:
+                # Single chunk - use as is
+                combined_embedding = file_chunk_embeddings[0]
+            else:
+                # Multiple chunks - combine them
+                combined_embedding = chunker.combine_file_embeddings(
+                    chunked_file, file_chunk_embeddings, method="weighted_average"
+                )
+
+            final_embeddings.append(combined_embedding)
+            successful_files.append(file_idx)
+        else:
+            failed_files.append(file_idx)
+            logger.warning(f"Missing embeddings for file {file_idx}")
+
     # Log results
-    if failed_batches:
-        total_count = len(safe_batches)
+    if failed_files:
         logger.warning(
-            f"Partially completed: {len(successful_batches)}/{total_count} batches succeeded. "
-            f"Failed batches: {sorted(failed_batches)}"
+            f"Partially completed: {len(successful_files)}/{len(file_contents)} files succeeded. "
+            f"Failed file indices: {failed_files}"
         )
-    
-    return {
-        'embeddings': np.array(all_embeddings) if all_embeddings else np.array([]),
-        'successful_batches': successful_batches,
-        'failed_batches': list(failed_batches),
-        'texts': texts,
-        'safe_batches': safe_batches
-    }
+
+    return EmbeddingResult(
+        embeddings=np.array(final_embeddings) if final_embeddings else np.array([]),
+        successful_files=successful_files,
+        failed_files=failed_files,
+        chunked_files=chunked_files
+    )

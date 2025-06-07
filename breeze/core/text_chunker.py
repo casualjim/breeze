@@ -1,13 +1,17 @@
 """Text chunking utilities for embedding models.
 
-This module provides utilities to split long texts into overlapping chunks
-that fit within model token limits, ensuring no content is lost.
+This module provides semantic code chunking using tree-sitter to split
+at logical boundaries like functions and classes.
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Tuple, Protocol
+from typing import List, Any, Optional, Protocol, Tuple
 from dataclasses import dataclass
 import numpy as np
+import tree_sitter_language_pack
+from tree_sitter import Query
+
+from breeze.core.tree_sitter_queries import get_query_for_language
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,28 @@ class TextChunk:
     estimated_tokens: int
 
 
+@dataclass
+class FileContent:
+    """Represents a file's content with its metadata."""
+    content: str
+    file_path: str
+    language: str
+
+
+@dataclass 
+class ChunkedFile:
+    """Represents a file that has been chunked."""
+    source: FileContent
+    chunks: List[TextChunk]
+    
+    @property
+    def total_tokens(self) -> int:
+        """Total estimated tokens across all chunks."""
+        return sum(chunk.estimated_tokens for chunk in self.chunks)
+
+
 class TextChunker:
-    """Handles text chunking for embedding models."""
+    """Handles semantic text chunking using tree-sitter."""
     
     def __init__(self, 
                  tokenizer: Optional[Tokenizer] = None,
@@ -57,6 +81,7 @@ class TextChunker:
         """
         self.tokenizer = tokenizer
         self.config = config or ChunkingConfig(max_tokens=8192)
+        self._parsers = {}
         
     def estimate_tokens(self, text: str) -> int:
         """Estimate the number of tokens in text.
@@ -82,19 +107,166 @@ class TextChunker:
         # Fallback: estimate ~4 characters per token for code
         return max(1, len(text) // 4)
     
-    def chunk_text(self, text: str) -> List[TextChunk]:
-        """Split text into overlapping chunks.
+    def chunk_file(self, file_content: FileContent) -> ChunkedFile:
+        """Split a file into semantic chunks using tree-sitter.
         
         Args:
-            text: Text to chunk
+            file_content: File content with metadata
             
         Returns:
-            List of text chunks
+            ChunkedFile with chunks
         """
-        if not text:
-            return []
+        # Trim and check for empty content
+        trimmed_content = file_content.content.strip()
+        if len(trimmed_content) == 0:
+            return ChunkedFile(source=file_content, chunks=[])
+        
+        # Try semantic chunking with the file's language
+        chunks = self._chunk_semantic(trimmed_content, file_content.language)
+        
+        # Fall back to regular chunking if semantic fails
+        if not chunks:
+            chunks = self._chunk_regular(trimmed_content)
+        
+        return ChunkedFile(source=file_content, chunks=chunks)
+    
+    def chunk_files(self, file_contents: List[FileContent]) -> List[ChunkedFile]:
+        """Chunk multiple files.
+        
+        Args:
+            file_contents: List of file contents with metadata
             
-        # Calculate effective max tokens per chunk
+        Returns:
+            List of chunked files
+        """
+        return [self.chunk_file(fc) for fc in file_contents]
+    
+    def _chunk_semantic(self, text: str, language: str) -> List[TextChunk]:
+        """Chunk text using tree-sitter semantic boundaries."""
+        parser = self._get_parser(language)
+        if not parser:
+            return []
+        
+        try:
+            # Parse the code
+            tree = parser.parse(text.encode())
+            
+            # Get semantic units (functions, classes, etc.)
+            units = self._extract_semantic_units(tree, text, language)
+            if not units:
+                return []
+            
+            # Group units into chunks that fit token limit
+            return self._group_units_into_chunks(units, text)
+            
+        except Exception as e:
+            logger.warning(f"Semantic chunking failed: {e}")
+            return []
+    
+    def _get_parser(self, language: str):
+        """Get or create parser for language."""
+        if language not in self._parsers:
+            try:
+                self._parsers[language] = tree_sitter_language_pack.get_parser(language)
+            except Exception:
+                self._parsers[language] = None
+        return self._parsers[language]
+    
+    def _extract_semantic_units(self, tree, text: str, language: str) -> List[dict]:
+        """Extract functions, classes, etc. from the parse tree."""
+        units = []
+        
+        try:
+            lang = tree_sitter_language_pack.get_language(language)
+            query_pattern = get_query_for_language(language)
+            query = Query(lang, query_pattern)
+            
+            # Find all semantic units
+            matches = query.matches(tree.root_node)
+            
+            for _, captures in matches:
+                for capture_name, nodes in captures.items():
+                    for node in nodes:
+                        units.append({
+                            'type': capture_name,
+                            'start': node.start_byte,
+                            'end': node.end_byte,
+                            'text': text[node.start_byte:node.end_byte]
+                        })
+            
+            # Sort by position
+            units.sort(key=lambda u: u['start'])
+            return units
+            
+        except Exception as e:
+            logger.debug(f"Failed to extract semantic units: {e}")
+            return []
+    
+    def _group_units_into_chunks(self, units: List[dict], full_text: str) -> List[TextChunk]:
+        """Group semantic units into chunks respecting token limits."""
+        chunks = []
+        current_units = []
+        current_tokens = 0
+        
+        for unit in units:
+            unit_tokens = self.estimate_tokens(unit['text'])
+            
+            # If single unit is too large, split it
+            if unit_tokens > self.config.max_tokens:
+                # Flush current group
+                if current_units:
+                    chunks.append(self._units_to_chunk(current_units, full_text, len(chunks)))
+                    current_units = []
+                    current_tokens = 0
+                
+                # Split large unit
+                unit_chunks = self._chunk_regular(unit['text'])
+                for i, chunk in enumerate(unit_chunks):
+                    # Adjust positions relative to full text
+                    chunk.start_char += unit['start']
+                    chunk.end_char = chunk.start_char + len(chunk.text)
+                    chunk.chunk_index = len(chunks) + i
+                chunks.extend(unit_chunks)
+                continue
+            
+            # Check if adding this unit exceeds limit
+            if current_units and current_tokens + unit_tokens > self.config.max_tokens:
+                # Create chunk from current units
+                chunks.append(self._units_to_chunk(current_units, full_text, len(chunks)))
+                current_units = []
+                current_tokens = 0
+            
+            # Add unit to current group
+            current_units.append(unit)
+            current_tokens += unit_tokens
+        
+        # Flush remaining units
+        if current_units:
+            chunks.append(self._units_to_chunk(current_units, full_text, len(chunks)))
+        
+        # Update total chunks
+        for chunk in chunks:
+            chunk.total_chunks = len(chunks)
+        
+        return chunks
+    
+    def _units_to_chunk(self, units: List[dict], full_text: str, chunk_index: int) -> TextChunk:
+        """Convert a group of semantic units to a chunk."""
+        start = min(u['start'] for u in units)
+        end = max(u['end'] for u in units)
+        text = full_text[start:end]
+        
+        return TextChunk(
+            text=text,
+            start_char=start,
+            end_char=end,
+            chunk_index=chunk_index,
+            total_chunks=0,  # Will be updated
+            estimated_tokens=self.estimate_tokens(text)
+        )
+    
+    def _chunk_regular(self, text: str) -> List[TextChunk]:
+        """Regular chunking when semantic chunking isn't available."""
         effective_max = self.config.max_tokens - self.config.reserved_tokens
         
         # If text fits in one chunk, return as is
@@ -109,13 +281,9 @@ class TextChunker:
                 estimated_tokens=total_tokens
             )]
         
-        chunks = []
-        
         if self.tokenizer:
-            # Use tokenizer for precise chunking
             chunks = self._chunk_with_tokenizer(text, effective_max)
         else:
-            # Use character-based chunking
             chunks = self._chunk_by_characters(text, effective_max)
             
         return chunks
@@ -280,25 +448,44 @@ class TextChunker:
             
         else:
             raise ValueError(f"Unknown combination method: {method}")
+    
+    def combine_file_embeddings(self,
+                               chunked_file: ChunkedFile,
+                               chunk_embeddings: List[np.ndarray],
+                               method: str = "weighted_average") -> np.ndarray:
+        """Combine embeddings for all chunks of a file.
+        
+        Args:
+            chunked_file: The chunked file with metadata
+            chunk_embeddings: Embeddings for each chunk in the file
+            method: Combination method
+            
+        Returns:
+            Single embedding for the entire file
+        """
+        if len(chunk_embeddings) != len(chunked_file.chunks):
+            raise ValueError(f"Mismatch: {len(chunk_embeddings)} embeddings for {len(chunked_file.chunks)} chunks")
+        
+        return self.combine_chunk_embeddings(chunk_embeddings, chunked_file.chunks, method)
 
 
-def create_batches_from_chunks(chunks_per_text: List[List[TextChunk]], 
-                              batch_size: int = 32) -> List[List[Tuple[int, TextChunk]]]:
-    """Create batches from chunks, preserving which text each chunk came from.
+def create_batches_from_chunked_files(chunked_files: List[ChunkedFile], 
+                                     batch_size: int = 32) -> List[List[Tuple[int, FileContent, TextChunk]]]:
+    """Create batches from chunked files, preserving file metadata with each chunk.
     
     Args:
-        chunks_per_text: List of chunk lists, one per input text
+        chunked_files: List of chunked files
         batch_size: Maximum chunks per batch
         
     Returns:
-        List of batches, where each batch contains (text_index, chunk) tuples
+        List of batches, where each batch contains (file_index, file_content, chunk) tuples
     """
     batches = []
     current_batch = []
     
-    for text_idx, chunks in enumerate(chunks_per_text):
-        for chunk in chunks:
-            current_batch.append((text_idx, chunk))
+    for file_idx, chunked_file in enumerate(chunked_files):
+        for chunk in chunked_file.chunks:
+            current_batch.append((file_idx, chunked_file.source, chunk))
             
             if len(current_batch) >= batch_size:
                 batches.append(current_batch)

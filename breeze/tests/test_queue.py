@@ -254,24 +254,22 @@ class TestIndexingQueue:
         )
         await test_engine.save_indexing_task(completed_task)
         
-        # Create queue and restore
-        queue = IndexingQueue(test_engine)
-        await queue.restore_from_database()
+        # Simulate engine restart by calling reset interrupted tasks
+        await test_engine._reset_interrupted_tasks()
         
-        # Check queue status
-        status = await queue.get_queue_status()
-        
-        # Should have 2 tasks (queued + running converted to queued)
-        assert status["queue_size"] == 2
-        
-        # Check running task was reset to queued
+        # Check that running task was reset to queued
         updated_running = await test_engine.get_indexing_task_db(running_task.task_id)
         assert updated_running.status == "queued"
         assert updated_running.started_at is None
         
-        # Completed task should not be in queue
-        queue_ids = [t["task_id"] for t in status["queued_tasks"]]
-        assert completed_task.task_id not in queue_ids
+        # Queued task should remain queued
+        updated_queued = await test_engine.get_indexing_task_db(queued_task.task_id)
+        assert updated_queued.status == "queued"
+        
+        # Completed task should remain completed
+        updated_completed = await test_engine.get_indexing_task_db(completed_task.task_id)
+        assert updated_completed.status == "completed"
+        assert updated_completed.completed_at is not None
     
     @pytest.mark.asyncio  
     async def test_concurrent_safety(self, test_engine):
