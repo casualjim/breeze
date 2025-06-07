@@ -5,7 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Optional, Dict, Any, Callable
 from datetime import datetime
 
-from breeze.core.models import IndexingTask, IndexStats
+from breeze.core.models import IndexingTask, IndexStats, QueueStatus, QueuedTaskInfo
 
 if TYPE_CHECKING:
     from breeze.core.engine import BreezeEngine
@@ -75,27 +75,27 @@ class IndexingQueue:
         
         return task.queue_position
     
-    async def get_queue_status(self) -> Dict[str, Any]:
+    async def get_queue_status(self) -> QueueStatus:
         """Get current queue status."""
         queued_tasks = await self.engine.list_tasks_by_status("queued")
         
         # UUID v7 is already time-ordered, so sorting by task_id gives us chronological order
         queued_tasks.sort(key=lambda t: t.task_id)
         
-        return {
-            "queue_size": self._queue.qsize(),
-            "current_task": self._current_task.task_id if self._current_task else None,
-            "current_task_progress": self._current_task.progress if self._current_task else None,
-            "queued_tasks": [
-                {
-                    "task_id": task.task_id,
-                    "paths": task.paths,
-                    "queue_position": idx,
-                    "created_at": task.created_at.isoformat()
-                }
+        return QueueStatus(
+            queue_size=self._queue.qsize(),
+            current_task=self._current_task.task_id if self._current_task else None,
+            current_task_progress=self._current_task.progress if self._current_task else None,
+            queued_tasks=[
+                QueuedTaskInfo(
+                    task_id=task.task_id,
+                    paths=task.paths,
+                    queue_position=idx,
+                    created_at=task.created_at.isoformat()
+                )
                 for idx, task in enumerate(queued_tasks)
             ]
-        }
+        )
     
     async def _worker(self):
         """Background worker that processes tasks from the queue."""

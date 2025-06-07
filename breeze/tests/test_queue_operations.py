@@ -136,14 +136,14 @@ async def test_get_queue_status(queue, mock_engine):
     # Get status
     status = await queue.get_queue_status()
 
-    assert status["queue_size"] == 0  # No tasks actually in memory queue
-    assert status["current_task"] is None
-    assert status["current_task_progress"] is None
-    assert len(status["queued_tasks"]) == 2
+    assert status.queue_size == 0  # No tasks actually in memory queue
+    assert status.current_task is None
+    assert status.current_task_progress is None
+    assert len(status.queued_tasks) == 2
 
     # Verify tasks are ordered by task_id (chronological for UUID v7)
-    assert status["queued_tasks"][0]["task_id"] == "task1"
-    assert status["queued_tasks"][1]["task_id"] == "task2"
+    assert status.queued_tasks[0].task_id == "task1"
+    assert status.queued_tasks[1].task_id == "task2"
 
 
 @pytest.mark.asyncio

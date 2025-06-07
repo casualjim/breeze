@@ -28,6 +28,15 @@ from breeze.core.models import (
     IndexingTask,
     FailedBatch,
     get_code_document_schema,
+    IndexStatsResult,
+    FailedBatchStats,
+    PipelineResult,
+    DocumentData,
+    WatchingStartedEvent,
+    IndexingStartedEvent,
+    IndexingProgressEvent,
+    IndexingCompletedEvent,
+    IndexingErrorEvent,
 )
 from breeze.core.embeddings import get_voyage_embeddings_with_limits, get_local_embeddings_with_tokenizer_chunking
 from breeze.core.queue import IndexingQueue
@@ -290,9 +299,9 @@ class BreezeEngine:
 
         # Update stats from pipeline results
         stats.files_scanned = len(files_to_index)
-        stats.files_indexed = pipeline_stats["indexed"]
-        stats.files_updated = pipeline_stats["updated"]
-        stats.errors = pipeline_stats["errors"]
+        stats.files_indexed = pipeline_stats.indexed
+        stats.files_updated = pipeline_stats.updated
+        stats.errors = pipeline_stats.errors
         stats.files_skipped = (
             stats.files_scanned
             - stats.files_indexed
@@ -680,10 +689,10 @@ class BreezeEngine:
             logger.warning(f"Local reranking failed: {e}, returning original results")
             return [r[0] for r in results_with_content]
 
-    async def get_stats(self) -> Dict:
+    async def get_stats(self) -> IndexStatsResult:
         """Get current index statistics."""
         if not self._initialized or self.table is None:
-            return {"total_documents": 0, "initialized": False}
+            return IndexStatsResult(total_documents=0, initialized=False)
 
         table_len = await self.table.count_rows()
 
@@ -695,44 +704,60 @@ class BreezeEngine:
         if self._indexing_queue:
             queue_stats = await self._indexing_queue.get_queue_status()
 
-        return {
-            "total_documents": table_len,
-            "initialized": True,
-            "model": self.config.embedding_model,
-            "database_path": self.config.get_db_path(),
-            "failed_batches": failed_stats,
-            "indexing_queue": queue_stats,
-        }
+        return IndexStatsResult(
+            total_documents=table_len,
+            initialized=True,
+            model=self.config.embedding_model,
+            database_path=self.config.get_db_path(),
+            failed_batches=failed_stats,
+            indexing_queue=queue_stats,
+        )
 
-    async def _get_failed_batch_stats(self) -> Dict:
+    async def _get_failed_batch_stats(self) -> FailedBatchStats:
         """Get statistics about failed batches."""
         try:
             if not self.failed_batches_table:
-                return {}
+                return FailedBatchStats()
 
-            arrow_table = await self.failed_batches_table.to_arrow()
-            import polars as pl
+            # Get total count first
+            total = await self.failed_batches_table.count_rows()
+            if total == 0:
+                return FailedBatchStats(total=0)
 
-            df = pl.from_arrow(arrow_table)
-            if df.height == 0:
-                return {"total": 0}
+            # Run all count queries in parallel using asyncio.gather
+            counts = await asyncio.gather(
+                self.failed_batches_table.count_rows(filter="status = 'pending'"),
+                self.failed_batches_table.count_rows(filter="status = 'processing'"),
+                self.failed_batches_table.count_rows(filter="status = 'succeeded'"),
+                self.failed_batches_table.count_rows(filter="status = 'failed'"),
+                self.failed_batches_table.count_rows(filter="status = 'abandoned'"),
+                # Also get the oldest pending batch
+                self.failed_batches_table.search()
+                    .where("status = 'pending'")
+                    .select(["next_retry_at"])
+                    .limit(1)
+                    .to_pydantic(FailedBatch),
+            )
+            
+            pending_count, processing_count, succeeded_count, failed_count, abandoned_count, pending_batches = counts
+            
+            result = FailedBatchStats(
+                total=total,
+                pending=pending_count,
+                processing=processing_count,
+                succeeded=succeeded_count,
+                failed=failed_count,
+                abandoned=abandoned_count
+            )
 
-            # Count by status
-            status_counts = df.group_by("status").agg(pl.count()).to_dicts()
-            stats = {row["status"]: row["count"] for row in status_counts}
-            stats["total"] = df.height
+            # Set next retry time if we have pending batches
+            if pending_batches and pending_batches[0].next_retry_at:
+                result.next_retry_at = pending_batches[0].next_retry_at.isoformat()
 
-            # Get oldest pending batch
-            pending = df.filter(pl.col("status") == "pending")
-            if pending.height > 0:
-                oldest = pending.select("next_retry_at").min().item()
-                if oldest:
-                    stats["next_retry_at"] = oldest.isoformat()
-
-            return stats
+            return result
         except Exception as e:
             logger.error(f"Error getting failed batch stats: {e}")
-            return {}
+            return FailedBatchStats()
 
     async def _get_existing_docs(self) -> Dict[str, str]:
         """Get existing documents from the table."""
@@ -1097,11 +1122,11 @@ class BreezeEngine:
             if all_tasks:
                 await asyncio.gather(*all_tasks, return_exceptions=True)
 
-        return {
-            "indexed": total_indexed,
-            "updated": total_updated,
-            "errors": total_errors,
-        }
+        return PipelineResult(
+            indexed=total_indexed,
+            updated=total_updated,
+            errors=total_errors,
+        )
 
     async def _read_file_batch(
         self, file_paths: List[Path], existing_docs: Dict[str, str], force_reindex: bool

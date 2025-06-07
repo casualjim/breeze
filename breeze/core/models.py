@@ -1,8 +1,9 @@
 """Data models for Breeze code indexing using Pydantic v2."""
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from enum import Enum
+from dataclasses import dataclass, field, asdict
 
 from pydantic import BaseModel, ConfigDict, Field
 from lancedb.pydantic import LanceModel, Vector
@@ -156,3 +157,123 @@ def get_code_document_schema(embedding_model):
         vector: Vector(embedding_model.ndims()) = embedding_model.VectorField(default=None)  # type: ignore
     
     return CodeDocumentWithEmbedding
+
+
+# Stats and Results dataclasses to replace dict returns
+
+@dataclass
+class FailedBatchStats:
+    """Statistics about failed batches."""
+    total: int = 0
+    pending: int = 0
+    processing: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    abandoned: int = 0
+    next_retry_at: Optional[str] = None
+
+
+@dataclass
+class IndexStatsResult:
+    """Result from get_stats() method."""
+    total_documents: int
+    initialized: bool
+    model: Optional[str] = None
+    database_path: Optional[str] = None
+    failed_batches: Optional[FailedBatchStats] = None
+    indexing_queue: Optional['QueueStatus'] = None
+
+
+@dataclass
+class PipelineResult:
+    """Result from indexing pipeline execution."""
+    indexed: int = 0
+    updated: int = 0
+    errors: int = 0
+
+
+@dataclass
+class QueuedTaskInfo:
+    """Information about a queued task."""
+    task_id: str
+    paths: List[str]
+    queue_position: int
+    created_at: str  # ISO format string
+
+
+@dataclass
+class QueueStatus:
+    """Status of the indexing queue."""
+    queue_size: int
+    current_task: Optional[str] = None
+    current_task_progress: Optional[float] = None
+    queued_tasks: List[QueuedTaskInfo] = field(default_factory=list)
+
+
+@dataclass 
+class DocumentData:
+    """Data for a single document to be indexed."""
+    id: str
+    file_path: str
+    content: str
+    file_type: str
+    file_size: int
+    last_modified: datetime
+    indexed_at: datetime
+    content_hash: str
+
+
+# Event notification dataclasses
+
+@dataclass
+class EventNotification:
+    """Base class for event notifications."""
+    type: str
+    project_id: str
+
+
+@dataclass
+class WatchingStartedEvent:
+    """Event when file watching starts."""
+    type: str = field(default="watching_started", init=False)
+    project_id: str
+    project_name: str = ""
+    paths: List[str] = field(default_factory=list)
+
+
+@dataclass
+class IndexingStartedEvent:
+    """Event when indexing starts."""
+    type: str = field(default="indexing_started", init=False)
+    project_id: str
+    project_name: str = ""
+    files: List[str] = field(default_factory=list)
+    count: int = 0
+
+
+@dataclass
+class IndexingProgressEvent:
+    """Event for indexing progress updates."""
+    type: str = field(default="indexing_progress", init=False)
+    project_id: str
+    progress: float = 0.0
+    processed_files: int = 0
+    total_files: int = 0
+    current_file: Optional[str] = None
+
+
+@dataclass
+class IndexingCompletedEvent:
+    """Event when indexing completes."""
+    type: str = field(default="indexing_completed", init=False)
+    project_id: str
+    project_name: str = ""
+    stats: Optional[Dict[str, Any]] = None  # IndexStats from task
+
+
+@dataclass
+class IndexingErrorEvent:
+    """Event when indexing encounters an error."""
+    type: str = field(default="indexing_error", init=False)
+    project_id: str
+    error: str = ""

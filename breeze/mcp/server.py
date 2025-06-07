@@ -4,6 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from dataclasses import asdict
 
 from fastmcp import FastMCP, Context
 from fastmcp.utilities.logging import get_logger
@@ -179,7 +180,7 @@ async def search_code(
 
         # Get index stats first
         stats = await engine.get_stats()
-        if stats["total_documents"] == 0:
+        if stats.total_documents == 0:
             return {
                 "status": "error",
                 "message": "No code has been indexed yet. Use the index_repository tool first.",
@@ -221,7 +222,16 @@ async def get_index_stats(ctx: Context = None) -> Dict[str, Any]:
         engine = await get_engine()
         stats = await engine.get_stats()
 
-        return {"status": "success", **stats}
+        # Convert dataclass to dict for JSON response
+        return {
+            "status": "success",
+            "total_documents": stats.total_documents,
+            "initialized": stats.initialized,
+            "model": stats.model,
+            "database_path": stats.database_path,
+            "failed_batches": asdict(stats.failed_batches) if stats.failed_batches else None,
+            "indexing_queue": asdict(stats.indexing_queue) if stats.indexing_queue else None,
+        }
 
     except Exception as e:
         if ctx:
@@ -473,24 +483,24 @@ async def get_all_indexing_tasks() -> Dict[str, Any]:
         queue_status = await engine._indexing_queue.get_queue_status()
 
         # Add current task if any
-        if queue_status["current_task"]:
+        if queue_status.current_task:
             tasks.append(
                 {
-                    "task_id": queue_status["current_task"],
+                    "task_id": queue_status.current_task,
                     "status": "running",
-                    "progress": queue_status.get("current_task_progress", {}),
+                    "progress": queue_status.current_task_progress,
                 }
             )
 
         # Add queued tasks
-        for task_info in queue_status.get("queued_tasks", []):
+        for task_info in queue_status.queued_tasks:
             tasks.append(
                 {
-                    "task_id": task_info["task_id"],
+                    "task_id": task_info.task_id,
                     "status": "queued",
-                    "queue_position": task_info["queue_position"],
-                    "paths": task_info["paths"],
-                    "created_at": task_info["created_at"],
+                    "queue_position": task_info.queue_position,
+                    "paths": task_info.paths,
+                    "created_at": task_info.created_at,
                 }
             )
 
@@ -512,7 +522,7 @@ async def get_indexing_task(task_id: str) -> Dict[str, Any]:
         queue_status = await engine._indexing_queue.get_queue_status()
 
         # Check if it's the current task
-        if queue_status["current_task"] == task_id:
+        if queue_status.current_task == task_id:
             # Get the task details from database
             tasks = await engine.list_indexing_tasks()
             for task in tasks:
@@ -522,20 +532,20 @@ async def get_indexing_task(task_id: str) -> Dict[str, Any]:
                         "status": "running",
                         "paths": task.paths,
                         "created_at": task.created_at.isoformat(),
-                        "progress": queue_status.get("current_task_progress", {}),
+                        "progress": queue_status.current_task_progress,
                         "stats": getattr(task, "stats", None),
                     }
             return {"error": "Task not found"}
 
         # Check queued tasks
-        for task_info in queue_status.get("queued_tasks", []):
-            if task_info["task_id"] == task_id:
+        for task_info in queue_status.queued_tasks:
+            if task_info.task_id == task_id:
                 return {
-                    "task_id": task_info["task_id"],
+                    "task_id": task_info.task_id,
                     "status": "queued",
-                    "queue_position": task_info["queue_position"],
-                    "paths": task_info["paths"],
-                    "created_at": task_info["created_at"],
+                    "queue_position": task_info.queue_position,
+                    "paths": task_info.paths,
+                    "created_at": task_info.created_at,
                 }
 
         return {"error": "Task not found"}
@@ -639,8 +649,8 @@ def create_app():
             engine = await get_engine()
             db_stats = await engine.get_stats()
             stats["database"] = {
-                "initialized": db_stats.get("initialized", False),
-                "total_documents": db_stats.get("total_documents", 0),
+                "initialized": db_stats.initialized,
+                "total_documents": db_stats.total_documents,
             }
         except Exception as e:
             stats["database"] = {"error": str(e)}

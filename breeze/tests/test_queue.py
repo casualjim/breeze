@@ -64,8 +64,8 @@ class TestIndexingQueue:
         status = await queue.get_queue_status()
         # The queue might be processing already, so check if task exists
         # either in queue or being processed
-        assert status["queue_size"] >= 0  # Could be 0 if already processing
-        assert status["current_task"] == task.task_id or status["queue_size"] == 1
+        assert status.queue_size >= 0  # Could be 0 if already processing
+        assert status.current_task == task.task_id or status.queue_size == 1
         
         await queue.stop()
     
