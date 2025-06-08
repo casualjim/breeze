@@ -54,9 +54,10 @@ if os.environ.get("BREEZE_DEBUG_LANCE"):
 class BreezeEngine:
     """Main engine for code indexing and search operations."""
 
-    def __init__(self, config: Optional[BreezeConfig] = None):
+    def __init__(self, config: Optional[BreezeConfig] = None, tokenizer=None):
         self.config = config or BreezeConfig()
         self.config.ensure_directories()
+        self.tokenizer = tokenizer  # Pre-loaded tokenizer to avoid repeated loading
 
         self.db: Optional[lancedb.LanceDBConnection] = None
         self.table: Optional[lancedb.Table] = None
@@ -145,28 +146,12 @@ class BreezeEngine:
                             name=self.config.embedding_model
                         )
 
-                    # Initialize tokenizer for Voyage
-                    try:
-                        from tokenizers import Tokenizer
-
-                        # Load the Voyage-specific tokenizer from HuggingFace
-                        tokenizer_name = (
-                            "voyageai/voyage-code-3"
-                            if self.config.embedding_model == "voyage-code-3"
-                            else "voyageai/voyage-code-2"
-                        )
-                        self.tokenizer = Tokenizer.from_pretrained(tokenizer_name)
-                        logger.info(
-                            f"Using HuggingFace tokenizer for accurate token counting with Voyage: {tokenizer_name}"
-                        )
-                    except ImportError:
+                    # Tokenizer should be passed in via constructor to avoid repeated loading
+                    if not self.tokenizer:
                         logger.warning(
-                            "tokenizers not available, token limits may be exceeded"
+                            f"No tokenizer provided for Voyage model {self.config.embedding_model}. "
+                            "Token counting may be less accurate."
                         )
-                        logger.warning("Install with: pip install tokenizers")
-                    except Exception as e:
-                        logger.warning(f"Failed to load Voyage tokenizer: {e}")
-                        logger.warning("Token limits may be exceeded")
 
                 elif self.config.embedding_model.startswith("models/"):
                     # Google Gemini models
@@ -938,14 +923,16 @@ class BreezeEngine:
                                         doc_datas = successful_doc_datas
                                 else:
                                     # Local model embedding generation with tokenizer-based chunking
+                                    # Always use 1 concurrent request for local models to avoid GPU conflicts
                                     result = await get_local_embeddings_with_tokenizer_chunking(
                                         file_contents,
                                         self.embedding_model,
                                         self.config.embedding_model,
-                                        max_concurrent_requests=self.config.concurrent_embedders or 5,
+                                        max_concurrent_requests=1,
                                         max_retries=3,
                                         retry_base_delay=1.0,
                                         max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
+                                        tokenizer=self.tokenizer,  # Pass pre-loaded tokenizer
                                     )
 
                                     embeddings = result.embeddings
@@ -1808,14 +1795,16 @@ class BreezeEngine:
                                         raise Exception("Some embeddings failed - retry later")
                                 else:
                                     # Use tokenizer-based chunking for local models
+                                    # Always use 1 concurrent request for local models to avoid GPU conflicts
                                     result = await get_local_embeddings_with_tokenizer_chunking(
                                         contents,
                                         self.embedding_model,
                                         self.config.embedding_model,
-                                        max_concurrent_requests=self.config.concurrent_embedders or 5,
+                                        max_concurrent_requests=1,
                                         max_retries=3,
                                         retry_base_delay=1.0,
                                         max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
+                                        tokenizer=self.tokenizer,  # Pass pre-loaded tokenizer
                                     )
 
                                     embeddings = result['embeddings']

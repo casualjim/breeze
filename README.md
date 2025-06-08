@@ -402,17 +402,19 @@ This project has a Breeze MCP server configured for fast semantic code search.
 ## Project Registration:
 
 If working on this codebase long-term:
-```
 
+```text
+
+```python
 register_project(
     name="MyProject",
     paths=["/path/to/project"],
     auto_index=true
 )
-
 ```
 
 This enables automatic re-indexing when files change, keeping search results current.
+
 ```
 
 ## License

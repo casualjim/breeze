@@ -94,13 +94,31 @@ class TextChunker:
         """
         if self.tokenizer:
             try:
-                encoded = self.tokenizer.encode(text, add_special_tokens=True)
-                if hasattr(encoded, 'ids'):
-                    return len(encoded.ids)
-                elif isinstance(encoded, list):
-                    return len(encoded)
+                # For long texts, count tokens in chunks to avoid tokenizer warnings
+                # about exceeding max sequence length
+                chunk_size = 8000  # Safe size under most tokenizer limits
+                
+                if len(text) > chunk_size * 4:  # Roughly 32k chars
+                    # Count tokens in chunks
+                    total_tokens = 0
+                    for i in range(0, len(text), chunk_size * 4):
+                        chunk = text[i:i + chunk_size * 4]
+                        encoded = self.tokenizer.encode(chunk, add_special_tokens=False)
+                        if hasattr(encoded, 'ids'):
+                            total_tokens += len(encoded.ids)
+                        else:
+                            total_tokens += len(encoded)
+                    # Add tokens for special tokens at start/end
+                    return total_tokens + 2
                 else:
-                    return len(encoded)
+                    # Short text - encode directly
+                    encoded = self.tokenizer.encode(text, add_special_tokens=True)
+                    if hasattr(encoded, 'ids'):
+                        return len(encoded.ids)
+                    elif isinstance(encoded, list):
+                        return len(encoded)
+                    else:
+                        return len(encoded)
             except Exception as e:
                 logger.debug(f"Tokenizer encoding failed: {e}, using fallback")
         
@@ -292,13 +310,28 @@ class TextChunker:
         """Chunk using tokenizer for precise token boundaries."""
         chunks = []
         
-        # Encode full text
+        # For very long texts, we need to encode in chunks to avoid tokenizer warnings
+        # We'll process the text in windows and stitch the token IDs together
         try:
-            full_encoded = self.tokenizer.encode(text, add_special_tokens=False)
-            if hasattr(full_encoded, 'ids'):
-                token_ids = full_encoded.ids
+            window_size = 8000 * 4  # ~8000 tokens worth of characters
+            
+            if len(text) > window_size:
+                # Encode in chunks and concatenate token IDs
+                token_ids = []
+                for i in range(0, len(text), window_size):
+                    chunk = text[i:i + window_size]
+                    encoded = self.tokenizer.encode(chunk, add_special_tokens=False)
+                    if hasattr(encoded, 'ids'):
+                        token_ids.extend(encoded.ids)
+                    else:
+                        token_ids.extend(encoded)
             else:
-                token_ids = full_encoded
+                # Short text - encode directly
+                full_encoded = self.tokenizer.encode(text, add_special_tokens=False)
+                if hasattr(full_encoded, 'ids'):
+                    token_ids = full_encoded.ids
+                else:
+                    token_ids = full_encoded
                 
             total_tokens = len(token_ids)
             

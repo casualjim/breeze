@@ -10,6 +10,7 @@ from fastmcp import FastMCP, Context
 from fastmcp.utilities.logging import get_logger
 
 from breeze.core import BreezeEngine, BreezeConfig
+from breeze.core.tokenizer_utils import load_tokenizer_for_model
 from breeze.core.models import IndexingTask
 
 # Use FastMCP's logging utility for consistent formatting
@@ -73,7 +74,14 @@ async def get_engine() -> BreezeEngine:
                     os.environ.get("BREEZE_VOYAGE_CONCURRENT_REQUESTS", "5")
                 ),
             )
-            engine = BreezeEngine(config)
+            
+            # Load tokenizer once for the model
+            tokenizer = load_tokenizer_for_model(
+                config.embedding_model, 
+                trust_remote_code=config.trust_remote_code
+            )
+            
+            engine = BreezeEngine(config, tokenizer=tokenizer)
             try:
                 await engine.initialize()
                 logger.info("BreezeEngine initialized successfully")

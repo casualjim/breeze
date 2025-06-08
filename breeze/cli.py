@@ -27,6 +27,7 @@ from rich.text import Text
 from collections import deque
 
 from breeze.core import BreezeEngine, BreezeConfig
+from breeze.core.tokenizer_utils import load_tokenizer_for_model
 
 # Suppress Voyage AI logging and HTTP request logging
 logging.getLogger("voyageai").setLevel(logging.ERROR)
@@ -199,7 +200,14 @@ def index(
             config_args["voyage_concurrent_requests"] = voyage_requests
 
         config = BreezeConfig(**config_args)
-        engine = BreezeEngine(config)
+        
+        # Load tokenizer once for the model
+        tokenizer = load_tokenizer_for_model(
+            config.embedding_model, 
+            trust_remote_code=config.trust_remote_code
+        )
+        
+        engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
         # Convert paths to strings
@@ -491,7 +499,14 @@ def search(
             config_args["voyage_tier"] = voyage_tier
 
         config = BreezeConfig(**config_args)
-        engine = BreezeEngine(config)
+        
+        # Load tokenizer once for the model
+        tokenizer = load_tokenizer_for_model(
+            config.embedding_model, 
+            trust_remote_code=config.trust_remote_code
+        )
+        
+        engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
         with console.status(f"[bold blue]Searching for: {query}[/bold blue]"):
@@ -640,7 +655,14 @@ def stats(
             config_args["voyage_tier"] = voyage_tier
 
         config = BreezeConfig(**config_args)
-        engine = BreezeEngine(config)
+        
+        # Load tokenizer once for the model
+        tokenizer = load_tokenizer_for_model(
+            config.embedding_model, 
+            trust_remote_code=config.trust_remote_code
+        )
+        
+        engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
         with console.status("[bold blue]Getting index statistics...[/bold blue]"):
@@ -680,7 +702,14 @@ def watch(
 
     async def run_watch():
         config = BreezeConfig()
-        engine = BreezeEngine(config)
+        
+        # Load tokenizer once for the model
+        tokenizer = load_tokenizer_for_model(
+            config.embedding_model, 
+            trust_remote_code=config.trust_remote_code
+        )
+        
+        engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
         # Find the project

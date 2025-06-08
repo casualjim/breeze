@@ -29,7 +29,9 @@
       "mcp__filesystem__read_file",
       "mcp__filesystem__list_directory",
       "mcp__zep__add_memory",
-      "mcp__github__get_file_contents"
+      "mcp__github__get_file_contents",
+      "Bash(python test_:*)",
+      "Bash(python test:*)"
     ],
     "deny": []
   }

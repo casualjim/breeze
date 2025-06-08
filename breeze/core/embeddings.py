@@ -409,6 +409,7 @@ async def get_local_embeddings_with_tokenizer_chunking(
     max_retries: int = 3,
     retry_base_delay: float = 1.0,
     max_sequence_length: Optional[int] = None,
+    tokenizer=None,  # Optional pre-loaded tokenizer
 ) -> Dict[str, Any]:
     """Get embeddings from local models with proper tokenizer-based chunking.
 
@@ -433,8 +434,7 @@ async def get_local_embeddings_with_tokenizer_chunking(
 
     logger = logging.getLogger(__name__)
 
-    # Try to load the tokenizer for the model
-    tokenizer = None
+    # Use provided tokenizer or load one if needed
     actual_max_length = 8192  # Default to 8k tokens like before
 
     # Skip tokenizer loading for mock embedders
@@ -453,36 +453,42 @@ async def get_local_embeddings_with_tokenizer_chunking(
         logger.debug(
             f"Skipping tokenizer loading for mock embedder: {type(model).__name__}"
         )
-    else:
+        tokenizer = None
+    elif tokenizer is None:
+        # Only load tokenizer if not provided
         try:
             from transformers import AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_name, trust_remote_code=True
             )
-
-            # Get the actual max sequence length from the tokenizer/model
-            if max_sequence_length:
-                actual_max_length = max_sequence_length
-            elif (
-                hasattr(tokenizer, "model_max_length")
-                and tokenizer.model_max_length < 1000000
-            ):
-                actual_max_length = tokenizer.model_max_length
-            elif hasattr(tokenizer, "max_len"):
-                actual_max_length = tokenizer.max_len
-            else:
-                # Try to get from model config if available
-                if hasattr(model, "model") and hasattr(model.model, "config"):
-                    if hasattr(model.model.config, "max_position_embeddings"):
-                        actual_max_length = model.model.config.max_position_embeddings
-
-            logger.info(
-                f"Using tokenizer for {model_name} with max sequence length: {actual_max_length}"
-            )
+            logger.debug(f"Loaded tokenizer for {model_name}")
         except Exception as e:
             logger.warning(f"Could not load tokenizer for {model_name}: {e}")
             logger.warning("Falling back to character-based estimation")
+    else:
+        logger.debug(f"Using provided tokenizer for {model_name}")
+
+    # Get the actual max sequence length from the tokenizer/model if we have a tokenizer
+    if tokenizer and not is_mock:
+        if max_sequence_length:
+            actual_max_length = max_sequence_length
+        elif (
+            hasattr(tokenizer, "model_max_length")
+            and tokenizer.model_max_length < 1000000
+        ):
+            actual_max_length = tokenizer.model_max_length
+        elif hasattr(tokenizer, "max_len"):
+            actual_max_length = tokenizer.max_len
+        else:
+            # Try to get from model config if available
+            if hasattr(model, "model") and hasattr(model.model, "config"):
+                if hasattr(model.model.config, "max_position_embeddings"):
+                    actual_max_length = model.model.config.max_position_embeddings
+
+        logger.info(
+            f"Using tokenizer for {model_name} with max sequence length: {actual_max_length}"
+        )
 
     # Create chunker with the actual max length
     chunker = TextChunker(
