@@ -5,7 +5,7 @@ import tempfile
 import pytest
 import pytest_asyncio
 from datetime import datetime, timedelta
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, AsyncMock
 
 from breeze.core.models import IndexingTask, IndexStats
 from breeze.core.queue import IndexingQueue

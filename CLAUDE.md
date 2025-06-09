@@ -118,3 +118,7 @@ uv run pytest
 - Use polars instead of pandas
 - Use identify/python-magic for language detection (not hardcoded mappings)
 - Use tree-sitter for semantic code analysis
+
+## Collaboration Guidelines
+
+- DO NOT MAKE STUFF UP / DO NOT MAKE ASSUMPTIONS - instead start a dialog with the user, we're a collaborative unit

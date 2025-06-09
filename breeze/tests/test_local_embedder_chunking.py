@@ -2,7 +2,7 @@
 
 import pytest
 import numpy as np
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock, patch
 from breeze.core.embeddings import get_local_embeddings_with_tokenizer_chunking
 from breeze.core.text_chunker import FileContent
 
@@ -183,7 +183,6 @@ class TestLocalEmbedderChunking:
     @pytest.mark.asyncio
     async def test_no_truncation_occurs(self):
         """Test that text is never truncated, only chunked."""
-        import logging
         
         # Set up logging capture
         with patch('breeze.core.embeddings.logger') as mock_logger:

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Optional, Dict, Any, Callable
+from typing import TYPE_CHECKING, Optional, Dict, Callable
 from datetime import datetime
 
 from breeze.core.models import IndexingTask, IndexStats, QueueStatus, QueuedTaskInfo
@@ -128,7 +128,7 @@ class IndexingQueue:
                 logger.error(f"Worker error: {e}", exc_info=True)
                 try:
                     await asyncio.sleep(1)  # Brief pause before continuing
-                except:
+                except asyncio.CancelledError:
                     # Can't sleep, probably shutting down
                     break
         

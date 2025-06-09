@@ -3,10 +3,8 @@
 import asyncio
 import tempfile
 from datetime import datetime
-from pathlib import Path
 import pytest
 import pytest_asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
 
 from breeze.core.models import IndexingTask, IndexStats
 from breeze.core.queue import IndexingQueue

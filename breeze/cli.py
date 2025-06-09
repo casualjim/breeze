@@ -9,6 +9,10 @@ import sys
 from typing import List, Optional
 from datetime import datetime
 
+# Disable progress bars early
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["HF_DISABLE_PROGRESS_BAR"] = "1"
+
 import typer
 from rich.console import Console
 from rich.progress import (
@@ -29,6 +33,10 @@ from collections import deque
 from breeze.core import BreezeEngine, BreezeConfig
 from breeze.core.tokenizer_utils import load_tokenizer_for_model
 
+import sentence_transformers
+
+sentence_transformers.SentenceTransformer.default_show_progress_bar = False
+
 # Suppress Voyage AI logging and HTTP request logging
 logging.getLogger("voyageai").setLevel(logging.ERROR)
 logging.getLogger("voyage").setLevel(logging.ERROR)
@@ -38,6 +46,7 @@ logging.getLogger("httpx").setLevel(logging.ERROR)
 
 try:
     import voyageai
+
     voyageai.log = "error"  # Set default log level for Voyage AI
 except ImportError:
     pass  # voyageai not installed yet
@@ -106,7 +115,7 @@ def setup_logging(verbose: bool = False, use_rich: bool = True):
         handlers=handlers,
         force=True,  # Force reconfiguration
     )
-    
+
     # Even in verbose mode, suppress these noisy loggers
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
@@ -180,7 +189,6 @@ def index(
 ):
     """Index code directories for semantic search."""
     setup_logging(verbose)
-    logger = logging.getLogger(__name__)
 
     async def run_indexing():
         # Create config with provided options
@@ -200,13 +208,12 @@ def index(
             config_args["voyage_concurrent_requests"] = voyage_requests
 
         config = BreezeConfig(**config_args)
-        
+
         # Load tokenizer once for the model
         tokenizer = load_tokenizer_for_model(
-            config.embedding_model, 
-            trust_remote_code=config.trust_remote_code
+            config.embedding_model, trust_remote_code=config.trust_remote_code
         )
-        
+
         engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
@@ -217,18 +224,30 @@ def index(
         for d in dir_strings:
             console.print(f"  • {d}")
 
-        console.print(
-            f"[yellow]Using {concurrent_readers} file readers, {concurrent_embedders} embedders, 1 writer[/yellow]"
-        )
-        
+        # Show configuration details
+        console.print("\n[bold yellow]Configuration:[/bold yellow]")
+        console.print(f"  • Model: {config.embedding_model}")
+        console.print(f"  • Device: {config.embedding_device}")
+        console.print(f"  • File readers: {concurrent_readers}")
+        console.print(f"  • Embedders: {concurrent_embedders}")
+        console.print("  • Writers: 1 (fixed)")
+
+        # Show actual batch size used for embeddings
+        if config.embedding_device == "mps" and not config.embedding_model.startswith(
+            ("voyage-", "models/")
+        ):
+            console.print("  • Batch size: 2 (MPS device - memory optimized)")
+        else:
+            console.print(f"  • Batch size: {config.get_batch_size()}")
+
         # Show Voyage tier info if using Voyage model
         if model and model.startswith("voyage-"):
             rate_limits = config.get_voyage_rate_limits()
             console.print(
-                f"[cyan]Voyage AI {rate_limits['tier_name']}: "
-                f"{rate_limits['tokens_per_minute']:,} tokens/min, "
-                f"{rate_limits['requests_per_minute']:,} requests/min, "
-                f"{rate_limits['concurrent_requests']} concurrent requests[/cyan]"
+                f"\n[cyan]Voyage AI {rate_limits['tier_name']}:[/cyan]\n"
+                f"  • Tokens/min: {rate_limits['tokens_per_minute']:,}\n"
+                f"  • Requests/min: {rate_limits['requests_per_minute']:,}\n"
+                f"  • Concurrent requests: {rate_limits['concurrent_requests']}"
             )
 
         # If verbose, use simple logging without fancy UI
@@ -239,12 +258,14 @@ def index(
             async def simple_progress_callback(progress_info):
                 # Track actual processed files
                 processed = (
-                    progress_info.get("files_indexed", 0) +
-                    progress_info.get("files_updated", 0) +
-                    progress_info.get("files_skipped", 0) +
-                    progress_info.get("errors", 0)
+                    progress_info.get("files_indexed", 0)
+                    + progress_info.get("files_updated", 0)
+                    + progress_info.get("files_skipped", 0)
+                    + progress_info.get("errors", 0)
                 )
-                if processed % 100 == 0 and processed > 0:  # Log every 100 processed files
+                if (
+                    processed % 100 == 0 and processed > 0
+                ):  # Log every 100 processed files
                     logger.info(
                         f"Progress: {processed} files processed "
                         f"(indexed: {progress_info.get('files_indexed', 0)}, "
@@ -273,29 +294,34 @@ def index(
 
             # Create layout that fills terminal height
             layout = Layout()
-            
+
             # Get terminal height to properly size sections
             terminal_height = console.size.height
-            
+
             # Fixed sizes for stats and progress
             stats_height = 8
             progress_height = 3
             padding_height = 3  # Reduced padding - just for borders
-            
+
             # Calculate remaining height for logs (leave 1-2 lines at bottom for safety)
-            logs_height = max(10, terminal_height - stats_height - progress_height - padding_height - 2)
-            
+            logs_height = max(
+                10,
+                terminal_height - stats_height - progress_height - padding_height - 2,
+            )
+
             layout.split_column(
-                Layout(name="logs", size=logs_height),     # Top section expands to fill
-                Layout(name="stats", size=stats_height),   # Fixed size for stats
-                Layout(name="progress", size=progress_height)  # Fixed size for progress bar
+                Layout(name="logs", size=logs_height),  # Top section expands to fill
+                Layout(name="stats", size=stats_height),  # Fixed size for stats
+                Layout(
+                    name="progress", size=progress_height
+                ),  # Fixed size for progress bar
             )
 
             # Keep log messages scaled to available display height
             # Each log line typically takes 1-2 lines when wrapped
             max_log_messages = max(10, logs_height // 2)
             log_messages = deque(maxlen=max_log_messages)
-            
+
             # Create progress bar for the bottom section
             progress = Progress(
                 SpinnerColumn(),
@@ -314,7 +340,7 @@ def index(
                 "files_updated": 0,
                 "files_skipped": 0,
                 "errors": 0,
-                "processed": 0
+                "processed": 0,
             }
 
             def update_display():
@@ -328,20 +354,32 @@ def index(
                     else:
                         # Fallback for string messages
                         combined_logs.append(str(msg) + "\n")
-                layout["logs"].update(Panel(combined_logs, title="Logs", border_style="blue"))
+                layout["logs"].update(
+                    Panel(combined_logs, title="Logs", border_style="blue")
+                )
 
                 # Update stats section
                 stats_table = Table(show_header=False, box=None)
                 stats_table.add_column("Metric", style="cyan")
                 stats_table.add_column("Value", style="green", justify="right")
-                
-                stats_table.add_row("Files Indexed", str(current_stats["files_indexed"]))
-                stats_table.add_row("Files Updated", str(current_stats["files_updated"]))
-                stats_table.add_row("Files Skipped", str(current_stats["files_skipped"]))
+
+                stats_table.add_row(
+                    "Files Indexed", str(current_stats["files_indexed"])
+                )
+                stats_table.add_row(
+                    "Files Updated", str(current_stats["files_updated"])
+                )
+                stats_table.add_row(
+                    "Files Skipped", str(current_stats["files_skipped"])
+                )
                 if current_stats["errors"] > 0:
-                    stats_table.add_row("Errors", f"[red]{current_stats['errors']}[/red]")
-                
-                layout["stats"].update(Panel(stats_table, title="Live Statistics", border_style="green"))
+                    stats_table.add_row(
+                        "Errors", f"[red]{current_stats['errors']}[/red]"
+                    )
+
+                layout["stats"].update(
+                    Panel(stats_table, title="Live Statistics", border_style="green")
+                )
 
                 # Update progress section
                 layout["progress"].update(Panel(progress, border_style="yellow"))
@@ -358,10 +396,10 @@ def index(
                             "INFO": "blue",
                             "WARNING": "yellow",
                             "ERROR": "red",
-                            "CRITICAL": "bold red"
+                            "CRITICAL": "bold red",
                         }
                         style = level_styles.get(record.levelname, "white")
-                        
+
                         # Create a Text object with proper styling
                         log_text = Text()
                         log_text.append(f"[{timestamp}] ", style="dim")
@@ -372,33 +410,45 @@ def index(
 
             # Add our custom handler temporarily
             layout_handler = RichLayoutHandler()
-            layout_handler.setFormatter(logging.Formatter('%(message)s'))
+            layout_handler.setFormatter(logging.Formatter("%(message)s"))
             logger = logging.getLogger()
             logger.addHandler(layout_handler)
 
             try:
-                with Live(layout, console=console, refresh_per_second=4, screen=True, vertical_overflow="visible") as live:
+                with Live(
+                    layout,
+                    console=console,
+                    refresh_per_second=4,
+                    screen=True,
+                    vertical_overflow="visible",
+                ):
                     # Progress callback that updates both stats and progress
                     async def progress_callback_with_layout(progress_info):
                         # Update stats
-                        current_stats["files_indexed"] = progress_info.get("files_indexed", 0)
-                        current_stats["files_updated"] = progress_info.get("files_updated", 0)
-                        current_stats["files_skipped"] = progress_info.get("files_skipped", 0)
+                        current_stats["files_indexed"] = progress_info.get(
+                            "files_indexed", 0
+                        )
+                        current_stats["files_updated"] = progress_info.get(
+                            "files_updated", 0
+                        )
+                        current_stats["files_skipped"] = progress_info.get(
+                            "files_skipped", 0
+                        )
                         current_stats["errors"] = progress_info.get("errors", 0)
-                        
+
                         # Track actual processed files
                         current_stats["processed"] = (
-                            current_stats["files_indexed"] +
-                            current_stats["files_updated"] +
-                            current_stats["files_skipped"] +
-                            current_stats["errors"]
+                            current_stats["files_indexed"]
+                            + current_stats["files_updated"]
+                            + current_stats["files_skipped"]
+                            + current_stats["errors"]
                         )
-                        
+
                         # Update progress bar
                         progress.update(
                             index_task, completed=current_stats["processed"]
                         )
-                        
+
                         # Refresh the display
                         update_display()
 
@@ -430,7 +480,7 @@ def index(
         table.add_row("Tokens Processed", f"{stats.total_tokens_processed:,}")
 
         console.print(table)
-        
+
         # Show failed batch info if any
         engine_stats = await engine.get_stats()
         failed_batches = engine_stats.get("failed_batches", {})
@@ -441,7 +491,7 @@ def index(
             console.print(f"  • Abandoned: {failed_batches.get('abandoned', 0)}")
             if "next_retry_at" in failed_batches:
                 console.print(f"  • Next retry: {failed_batches['next_retry_at']}")
-        
+
         console.print("\n[bold green]✓ Indexing complete![/bold green]")
 
     asyncio.run(run_indexing())
@@ -499,15 +549,21 @@ def search(
             config_args["voyage_tier"] = voyage_tier
 
         config = BreezeConfig(**config_args)
-        
+
         # Load tokenizer once for the model
         tokenizer = load_tokenizer_for_model(
-            config.embedding_model, 
-            trust_remote_code=config.trust_remote_code
+            config.embedding_model, trust_remote_code=config.trust_remote_code
         )
-        
+
         engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
+
+        # Show configuration for search
+        console.print("\n[bold yellow]Search Configuration:[/bold yellow]")
+        console.print(f"  • Model: {config.embedding_model}")
+        console.print(f"  • Device: {config.embedding_device}")
+        console.print(f"  • Min relevance: {min_relevance}")
+        console.print(f"  • Max results: {limit}\n")
 
         with console.status(f"[bold blue]Searching for: {query}[/bold blue]"):
             results = await engine.search(query, limit, min_relevance)
@@ -564,25 +620,47 @@ def serve(
     host = host or os.environ.get("BREEZE_HOST", "127.0.0.1")
     port = port or int(os.environ.get("BREEZE_PORT", "9483"))
 
+    # Create config to show server settings
+    config = BreezeConfig()
+
     console.print("[bold green]Starting Breeze MCP server[/bold green]")
-    console.print(f"  Host: {host}")
-    console.print(f"  Port: {port}")
-    console.print(f"  SSE endpoint: http://{host}:{port}/sse")
-    console.print(f"  HTTP endpoint: http://{host}:{port}/mcp")
-    console.print(f"  Health check: http://{host}:{port}/health")
+    console.print("\n[bold yellow]Server Configuration:[/bold yellow]")
+    console.print(f"  • Host: {host}")
+    console.print(f"  • Port: {port}")
+    console.print(f"  • Model: {config.embedding_model}")
+    console.print(f"  • Device: {config.embedding_device}")
+    console.print(f"  • File readers: {config.concurrent_readers}")
+    console.print(f"  • Embedders: {config.concurrent_embedders}")
+    console.print("  • Writers: 1 (fixed)")
+
+    # Show actual batch size used for embeddings
+    if config.embedding_device == "mps" and not config.embedding_model.startswith(
+        ("voyage-", "models/")
+    ):
+        console.print("  • Batch size: 2 (MPS device - memory optimized)")
+    else:
+        console.print(f"  • Batch size: {config.get_batch_size()}")
+
+    console.print("\n[bold cyan]Endpoints:[/bold cyan]")
+    console.print(f"  • SSE: http://{host}:{port}/sse")
+    console.print(f"  • HTTP: http://{host}:{port}/mcp")
+    console.print(f"  • Health: http://{host}:{port}/health")
     console.print()
     console.print("[dim]Press CTRL+C to stop[/dim]")
 
     # Set up signal handlers for graceful shutdown
     shutdown_requested = False
-    
+
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
         if not shutdown_requested:
             shutdown_requested = True
-            console.print("\n[yellow]Shutdown signal received. Shutting down gracefully...[/yellow]")
+            console.print(
+                "\n[yellow]Shutdown signal received. Shutting down gracefully...[/yellow]"
+            )
             # Schedule shutdown in async context
             import asyncio
+
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
@@ -593,7 +671,7 @@ def serve(
         else:
             console.print("\n[red]Force shutdown requested[/red]")
             sys.exit(1)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -655,13 +733,12 @@ def stats(
             config_args["voyage_tier"] = voyage_tier
 
         config = BreezeConfig(**config_args)
-        
+
         # Load tokenizer once for the model
         tokenizer = load_tokenizer_for_model(
-            config.embedding_model, 
-            trust_remote_code=config.trust_remote_code
+            config.embedding_model, trust_remote_code=config.trust_remote_code
         )
-        
+
         engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
@@ -681,7 +758,9 @@ def stats(
         failed_batches = stats.get("failed_batches", {})
         if failed_batches and failed_batches.get("total", 0) > 0:
             table.add_row("Failed Batches (Total)", str(failed_batches.get("total", 0)))
-            table.add_row("Failed Batches (Pending)", str(failed_batches.get("pending", 0)))
+            table.add_row(
+                "Failed Batches (Pending)", str(failed_batches.get("pending", 0))
+            )
             if "next_retry_at" in failed_batches:
                 table.add_row("Next Retry", failed_batches["next_retry_at"])
 
@@ -702,13 +781,12 @@ def watch(
 
     async def run_watch():
         config = BreezeConfig()
-        
+
         # Load tokenizer once for the model
         tokenizer = load_tokenizer_for_model(
-            config.embedding_model, 
-            trust_remote_code=config.trust_remote_code
+            config.embedding_model, trust_remote_code=config.trust_remote_code
         )
-        
+
         engine = BreezeEngine(config, tokenizer=tokenizer)
         await engine.initialize()
 
@@ -730,7 +808,16 @@ def watch(
         console.print(
             f"[bold green]Starting file watcher for project: {project.name}[/bold green]"
         )
-        console.print("[dim]Watching paths:[/dim]")
+
+        # Show watcher configuration
+        console.print("\n[bold yellow]Watcher Configuration:[/bold yellow]")
+        console.print(f"  • Model: {config.embedding_model}")
+        console.print(f"  • Device: {config.embedding_device}")
+        console.print(f"  • File readers: {config.concurrent_readers}")
+        console.print(f"  • Embedders: {config.concurrent_embedders}")
+        console.print(f"  • Debounce: {config.file_watcher_debounce_seconds}s")
+
+        console.print("\n[dim]Watching paths:[/dim]")
         for path in project.paths:
             console.print(f"  • {path}")
         console.print()

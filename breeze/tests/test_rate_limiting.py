@@ -20,7 +20,7 @@ class TestRateLimiting:
         tokenizer = MagicMock()
 
         # Mock encode to return an object with ids attribute
-        def encode_text(text):
+        def encode_text(text, add_special_tokens=True, **kwargs):
             result = MagicMock()
             result.ids = list(range(len(text) // 4))
             return result
@@ -247,7 +247,11 @@ class TestRateLimiting:
             
             file_contents = args[0]
             # Create chunker for testing
-            chunker = TextChunker(config=ChunkingConfig(max_tokens=8192))
+            from breeze.core.text_chunker import SimpleChunkingStrategy
+            mock_tokenizer = MagicMock()
+            mock_tokenizer.encode.return_value = MagicMock(ids=list(range(100)))
+            strategy = SimpleChunkingStrategy(tokenizer=mock_tokenizer)
+            chunker = TextChunker(strategy=strategy, config=ChunkingConfig(chunk_size=8192, model_max_tokens=8192))
             chunked_files = chunker.chunk_files(file_contents)
             
             return EmbeddingResult(

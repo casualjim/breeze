@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from enum import Enum
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 from lancedb.pydantic import LanceModel, Vector
@@ -190,6 +190,7 @@ class PipelineResult:
     indexed: int = 0
     updated: int = 0
     errors: int = 0
+    total_files_discovered: int = 0
 
 
 @dataclass

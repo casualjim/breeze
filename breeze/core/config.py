@@ -224,7 +224,15 @@ class BreezeConfig:
             if torch.cuda.is_available():
                 return "cuda"
             elif torch.backends.mps.is_available():
-                return "mps"
+                # MPS is available but many models have compatibility issues
+                # Specifically, models using FBGemm operations fail on MPS
+                # For now, default to CPU to avoid these issues
+                # Users can explicitly set device='mps' if their model supports it
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info("MPS device available but defaulting to CPU for compatibility. "
+                           "Set embedding_device='mps' explicitly if your model supports it.")
+                return "cpu"
         except ImportError:
             pass
         return "cpu"

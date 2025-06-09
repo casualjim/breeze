@@ -25,6 +25,21 @@ This document captures the implementation context for Breeze, including recent w
    - Deleted obsolete `chunking.py` and related tests
    - Now using `TextChunker` exclusively for all chunking needs
 
+5. **Fixed MPS Memory Issues**:
+   - Batch size set to 1 for MPS devices to avoid memory allocation errors
+   - Added explicit memory management for MPS devices
+   - Reduced concurrent requests for MPS to prevent GPU conflicts
+
+6. **Disabled Progress Bars**:
+   - Set `TQDM_DISABLE=1` and `HF_DISABLE_PROGRESS_BAR=1` environment variables
+   - Disabled sentence-transformers progress bars with `default_show_progress_bar = False`
+   - Progress bars suppressed in both CLI and programmatic usage
+
+7. **Fixed Tensor Dimension Mismatches**:
+   - Added embedding shape normalization to ensure consistent 1D arrays
+   - Embeddings are squeezed if they have extra dimensions
+   - Proper shape validation before combining chunk embeddings
+
 ### 🚧 Future Enhancements
 
 1. **nvim-treesitter Integration**: Use `locals.scm` files for richer semantic queries
@@ -90,6 +105,9 @@ This document captures the implementation context for Breeze, including recent w
 22. **Merged Duplicate Test Files** - Consolidated _v2 test files with originals
 23. **Removed ModelAwareChunker** - Deleted obsolete chunking implementation
 24. **Updated Navigation Module** - Uses ContentDetector instead of LanguageDetector
+25. **Fixed MPS Memory Issues** - Set batch size to 1 for MPS devices
+26. **Disabled Progress Bars** - Added environment variables to suppress all progress bars
+27. **Fixed Embedding Dimensions** - Normalized embeddings to consistent 1D arrays
 
 ### 📝 TODO
 
@@ -199,6 +217,9 @@ BREEZE_RERANKER_API_KEY=your-key  # Falls back to embedding API key
 7. **breeze-langdetect**: Requires reinstall if updated (not editable install)
 8. **Shebang Detection**: Works correctly with breeze-langdetect
 9. **Test File Creation**: Use Write tool instead of echo for proper shebangs
+10. **MPS Memory**: Batch size must be 1 for MPS devices to avoid allocation errors
+11. **Progress Bars**: Set TQDM_DISABLE=1 to suppress all progress bars
+12. **Token Warnings**: Tokenizer warnings are expected for long files before chunking
 
 ## Architecture Notes
 

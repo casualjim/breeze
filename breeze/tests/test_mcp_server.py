@@ -64,7 +64,6 @@ def fibonacci(n: int) -> int:
 async def test_engine(temp_data_dir):
     """Create a test engine with a temporary database."""
     # Import and register mock embedders
-    from .mock_embedders import RegisteredMockLocalEmbedder
 
     # Use the registered mock embedder
     registry = get_registry()
@@ -159,7 +158,7 @@ class TestMCPTools:
         import asyncio
 
         # First index the repository
-        index_result = await index_repository.fn(directories=[str(test_code_dir)], force_reindex=False)
+        await index_repository.fn(directories=[str(test_code_dir)], force_reindex=False)
 
         # Wait for indexing to complete by polling stats
         max_wait = 10  # seconds

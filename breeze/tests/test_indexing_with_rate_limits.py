@@ -77,7 +77,7 @@ async def test_indexing_continues_with_rate_limits():
                     print(f"Mock embeddings function called! Call count: {call_count}")
 
                     from breeze.core.embeddings import VoyageEmbeddingResult
-                    from breeze.core.text_chunker import FileContent, ChunkedFile
+                    from breeze.core.text_chunker import ChunkedFile
 
                     file_contents = args[0]
 

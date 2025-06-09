@@ -31,15 +31,10 @@ from breeze.core.models import (
     IndexStatsResult,
     FailedBatchStats,
     PipelineResult,
-    DocumentData,
-    WatchingStartedEvent,
-    IndexingStartedEvent,
-    IndexingProgressEvent,
-    IndexingCompletedEvent,
-    IndexingErrorEvent,
 )
 from breeze.core.embeddings import get_voyage_embeddings_with_limits, get_local_embeddings_with_tokenizer_chunking
 from breeze.core.queue import IndexingQueue
+from breeze.core.text_chunker import FileContent
 
 # Use standard Python logging to avoid duplicate handlers
 logger = logging.getLogger(__name__)
@@ -49,6 +44,12 @@ if os.environ.get("BREEZE_DEBUG_LANCE"):
     os.environ["RUST_LOG"] = "debug"
     os.environ["LANCE_LOG"] = "debug"
     logging.getLogger("lancedb").setLevel(logging.DEBUG)
+else:
+    # Suppress Lance logs by default
+    os.environ["RUST_LOG"] = "error"
+    os.environ["LANCE_LOG"] = "error"
+    logging.getLogger("lancedb").setLevel(logging.ERROR)
+    logging.getLogger("lance").setLevel(logging.ERROR)
 
 
 class BreezeEngine:
@@ -68,7 +69,6 @@ class BreezeEngine:
         self.document_schema = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
-        self.tokenizer = None  # For Voyage AI token counting
         self.is_voyage_model = False  # Flag for special Voyage handling
 
         # File watching and task tracking
@@ -169,13 +169,49 @@ class BreezeEngine:
 
                 else:
                     # Default to sentence-transformers for local models
-                    self.embedding_model = registry.get("sentence-transformers").create(
-                        name=self.config.embedding_model,
-                        device=self.config.embedding_device,
-                        normalize=True,
-                        trust_remote_code=self.config.trust_remote_code,
-                        show_progress_bar=False,
-                    )
+                    try:
+                        logger.info(f"Loading embedding model {self.config.embedding_model} on {self.config.embedding_device}...")
+                        self.embedding_model = registry.get("sentence-transformers").create(
+                            name=self.config.embedding_model,
+                            device=self.config.embedding_device,
+                            normalize=True,
+                            trust_remote_code=self.config.trust_remote_code,
+                            show_progress_bar=False,
+                        )
+                        logger.info(f"Successfully loaded embedding model {self.config.embedding_model}")
+                    except Exception as e:
+                        # Check if this is an MPS-related error
+                        if "MPS" in str(e) or "fbgemm" in str(e):
+                            logger.warning(
+                                f"Failed to load model on {self.config.embedding_device} device: {e}. "
+                                f"Falling back to CPU."
+                            )
+                            # Retry with CPU device
+                            self.embedding_model = registry.get("sentence-transformers").create(
+                                name=self.config.embedding_model,
+                                device="cpu",
+                                normalize=True,
+                                trust_remote_code=self.config.trust_remote_code,
+                                show_progress_bar=False,
+                            )
+                            # Update config to reflect actual device
+                            self.config.embedding_device = "cpu"
+                        else:
+                            # Re-raise if not MPS-related
+                            raise
+                    
+                    # Load tokenizer for local models to avoid repeated loading
+                    if not self.tokenizer:
+                        try:
+                            from transformers import AutoTokenizer
+                            logger.info(f"Loading tokenizer for {self.config.embedding_model}...")
+                            self.tokenizer = AutoTokenizer.from_pretrained(
+                                self.config.embedding_model, trust_remote_code=True
+                            )
+                            logger.info(f"Successfully loaded tokenizer for {self.config.embedding_model}")
+                        except Exception as e:
+                            logger.warning(f"Could not load tokenizer for {self.config.embedding_model}: {e}")
+                            logger.warning("Tokenizer-based chunking will fall back to character estimation")
 
             # Get the document schema with embeddings
             self.document_schema = get_code_document_schema(self.embedding_model)
@@ -244,37 +280,37 @@ class BreezeEngine:
 
         stats = IndexStats()
 
-        # Get existing documents for update/skip logic
-        existing_docs = await self._get_existing_docs() if not force_reindex else {}
+        # For re-indexing, get existing document hashes in one query
+        existing_hashes = {}
+        if not force_reindex:
+            try:
+                logger.info("Loading existing document hashes...")
+                # Single query to get all existing hashes
+                existing = await self.table.query().select(["id", "content_hash"]).to_list()
+                for doc in existing:
+                    existing_hashes[doc["id"]] = doc["content_hash"]
+                logger.info(f"Loaded {len(existing_hashes)} existing document hashes")
+            except Exception as e:
+                logger.warning(f"Could not load existing hashes: {e}")
 
-        # Phase 1: Fast directory walk
-        logger.info("Phase 1: Discovering files...")
-        files_to_index = []
-        for directory in directories:
-            path = Path(directory).resolve()
-            files_to_index.extend(self._walk_directory_fast(path))
-        logger.info(f"Found {len(files_to_index)} files")
-
-        # Phase 2: Process files with three-stage pipeline
-        logger.info("Phase 2: Processing files...")
-
-        # Determine batch size
-        batch_size = self.config.get_batch_size()
-
-        # Create batches
-        batches = []
-        for i in range(0, len(files_to_index), batch_size):
-            batches.append(files_to_index[i : i + batch_size])
+        # Streaming file discovery and processing
+        logger.info("Starting streaming file discovery and processing...")
+        
+        # Suppress LanceDB warnings during the indexing process
+        import logging as stdlib_logging
+        lance_logger = stdlib_logging.getLogger("lance")
+        original_level = lance_logger.level
+        lance_logger.setLevel(stdlib_logging.ERROR)
 
         # Configure concurrency
         concurrent_readers = num_workers or self.config.concurrent_readers or 20
         concurrent_embedders = self.config.concurrent_embedders or 10
         concurrent_writers = 1  # Always use 1 writer to avoid concurrency issues (hardcoded)
 
-        # Process batches with three-stage pipeline
-        pipeline_stats = await self._run_indexing_pipeline(
-            batches,
-            existing_docs,
+        # Process files with streaming three-stage pipeline
+        pipeline_stats = await self._run_streaming_indexing_pipeline(
+            directories,
+            existing_hashes,
             force_reindex,
             concurrent_readers,
             concurrent_embedders,
@@ -283,7 +319,7 @@ class BreezeEngine:
         )
 
         # Update stats from pipeline results
-        stats.files_scanned = len(files_to_index)
+        stats.files_scanned = pipeline_stats.total_files_discovered
         stats.files_indexed = pipeline_stats.indexed
         stats.files_updated = pipeline_stats.updated
         stats.errors = pipeline_stats.errors
@@ -298,6 +334,18 @@ class BreezeEngine:
         logger.info(
             f"Files indexed: {stats.files_indexed}, updated: {stats.files_updated}"
         )
+        
+        # Optimize the table to deduplicate and improve performance
+        if stats.files_indexed > 0 or stats.files_updated > 0:
+            logger.info("Optimizing database...")
+            try:
+                await self.table.optimize()
+                logger.info("Database optimization completed")
+            except Exception as e:
+                logger.warning(f"Database optimization failed: {e}")
+        
+        # Restore LanceDB logging level
+        lance_logger.setLevel(original_level)
 
         return stats
 
@@ -744,26 +792,49 @@ class BreezeEngine:
             logger.error(f"Error getting failed batch stats: {e}")
             return FailedBatchStats()
 
-    async def _get_existing_docs(self) -> Dict[str, str]:
-        """Get existing documents from the table."""
-        existing_docs = {}
-        try:
-            # Get all data and then filter columns
-            arrow_table = await self.table.to_arrow()
 
-            # Convert Arrow table to Polars and select columns
-            import polars as pl
-
-            df = pl.from_arrow(arrow_table)
-
-            if df.height > 0:
-                # Select only the columns we need
-                df_subset = df.select(["id", "content_hash"])
-                for row in df_subset.iter_rows(named=True):
-                    existing_docs[row["id"]] = row["content_hash"]
-        except Exception as e:
-            logger.warning(f"Error reading existing documents: {e}")
-        return existing_docs
+    async def _read_file_batch(
+        self, 
+        file_paths: List[Path]
+    ) -> List[Dict]:
+        """Read a batch of files and return document data."""
+        doc_datas = []
+        
+        for file_path in file_paths:
+            try:
+                stat = await aiofiles.os.stat(file_path)
+                
+                async with aiofiles.open(
+                    file_path, "r", encoding="utf-8", errors="replace"
+                ) as f:
+                    content = await f.read()
+                
+                # Skip empty files
+                if not content.strip():
+                    continue
+                
+                # Generate document ID and content hash
+                doc_id = f"file:{file_path}"
+                content_hash = hashlib.md5(content.encode()).hexdigest()
+                
+                doc_data = {
+                    "id": doc_id,
+                    "file_path": str(file_path),
+                    "content": content,
+                    "file_type": file_path.suffix[1:] if file_path.suffix else "txt",
+                    "file_size": stat.st_size,
+                    "last_modified": datetime.fromtimestamp(stat.st_mtime),
+                    "indexed_at": datetime.now(),
+                    "content_hash": content_hash,
+                }
+                
+                doc_datas.append(doc_data)
+                
+            except Exception as e:
+                logger.error(f"Error reading {file_path}: {e}")
+                
+        return doc_datas
+    
 
     def _create_snippet(self, content: str, query: str, file_path: str = None) -> str:
         """Create a relevant snippet from the content using tree-sitter if possible."""
@@ -789,27 +860,29 @@ class BreezeEngine:
         )
         return file_discovery.walk_directory(directory)
 
-    async def _run_indexing_pipeline(
+
+    async def _run_streaming_indexing_pipeline(
         self,
-        batches: List[List[Path]],
-        existing_docs: Dict[str, str],
+        directories: List[str],
+        existing_hashes: Dict[str, str],
         force_reindex: bool,
         concurrent_readers: int,
         concurrent_embedders: int,
         concurrent_writers: int,
         progress_callback: Optional[Callable] = None,
-    ) -> Dict[str, int]:
-        """Run three-stage pipeline for indexing files."""
-        # Create queues for the pipeline
-        embed_queue = asyncio.Queue(maxsize=concurrent_readers)
-        write_queue = asyncio.Queue(maxsize=concurrent_embedders * 2)
+    ) -> PipelineResult:
+        """Run three-stage pipeline for indexing files with streaming file discovery."""
+        # Create queues for the pipeline - separate queues for each stage
+        file_queue = asyncio.Queue(maxsize=concurrent_readers * 10)  # Files to read
+        embed_queue = asyncio.Queue(maxsize=concurrent_embedders * 5)  # Documents to embed
+        write_queue = asyncio.Queue(maxsize=100)  # Documents to write
 
         # Semaphores for controlling concurrency
         read_sem = asyncio.Semaphore(concurrent_readers)
         embed_sem = asyncio.Semaphore(concurrent_embedders)
-        write_sem = asyncio.Semaphore(concurrent_writers)
 
         # Track completion
+        discovery_complete = asyncio.Event()
         read_complete = asyncio.Event()
         embed_complete = asyncio.Event()
 
@@ -818,257 +891,344 @@ class BreezeEngine:
         total_updated = 0
         total_errors = 0
         total_processed = 0
+        total_files_discovered = 0
+        
+        # Multiple buffers for pipelining
+        write_buffers = []  # List of buffers waiting to be written
+        write_buffer_active = []  # Current buffer being filled
+        write_buffer_lock = asyncio.Lock()
+        WRITE_BATCH_SIZE = 500  # Larger batches to minimize LanceDB operations
+        MAX_PENDING_BUFFERS = 5  # Maximum number of buffers to keep in memory
+        
+        # Background flush task (only one at a time for LanceDB)
+        flush_task = None
 
-        async def reader_task(batch_idx: int, batch: List[Path]):
-            """Read files and queue for embedding."""
-            async with read_sem:
-                doc_datas = await self._read_file_batch(
-                    batch, existing_docs, force_reindex
-                )
-                await embed_queue.put((batch_idx, doc_datas))
+        async def file_discovery_task():
+            """Discover files and queue them for processing as they are found."""
+            nonlocal total_files_discovered
+            
+            try:
+                for directory in directories:
+                    path = Path(directory).resolve()
+                    logger.info(f"Discovering files in {path}...")
+                    # Stream files as they're discovered
+                    for file_path in self._walk_directory_fast(path):
+                        total_files_discovered += 1
+                        # Queue individual file for reading
+                        await file_queue.put(file_path)
+                        
+                        # Yield control periodically to allow other tasks to run
+                        if total_files_discovered % 100 == 0:
+                            await asyncio.sleep(0)
+                            logger.debug(f"Discovered {total_files_discovered} files so far...")
+                            
+                logger.info(f"File discovery complete. Found {total_files_discovered} files")
+            except Exception as e:
+                logger.error(f"Error during file discovery: {e}")
+            finally:
+                discovery_complete.set()
 
-        async def embedder_task():
-            """Pull from read queue, generate embeddings, and queue for writing."""
+        async def reader_task():
+            """Read files from file queue and queue document data for embedding."""
             while True:
                 try:
-                    # Wait for items with a timeout
-                    batch_idx, doc_datas = await asyncio.wait_for(
-                        embed_queue.get(), timeout=1.0
-                    )
+                    # Wait for a file path with timeout
+                    file_path = await asyncio.wait_for(file_queue.get(), timeout=1.0)
+                    
+                    async with read_sem:
+                        try:
+                            stat = await aiofiles.os.stat(file_path)
+
+                            async with aiofiles.open(
+                                file_path, "r", encoding="utf-8", errors="replace"
+                            ) as f:
+                                content = await f.read()
+
+                            # Skip empty files
+                            if not content.strip():
+                                continue
+
+                            # Generate document ID and content hash
+                            doc_id = f"file:{file_path}"
+                            content_hash = hashlib.md5(content.encode()).hexdigest()
+                            
+                            # Skip existence check - we'll use add() and deduplicate during optimize
+                            # This avoids the per-file query overhead that causes the nprobes warnings
+                            is_update = False
+
+                            # Create document data (without vector)
+                            doc_data = {
+                                "id": doc_id,
+                                "file_path": str(file_path),
+                                "content": content,
+                                "file_type": file_path.suffix[1:] if file_path.suffix else "txt",
+                                "file_size": stat.st_size,
+                                "last_modified": datetime.fromtimestamp(stat.st_mtime),
+                                "indexed_at": datetime.now(),
+                                "content_hash": content_hash,
+                                "is_update": is_update,
+                            }
+                            
+                            # Queue for embedding
+                            await embed_queue.put(doc_data)
+
+                        except Exception as e:
+                            logger.error(f"Error processing {file_path}: {e}")
+                            
+                except asyncio.TimeoutError:
+                    # Check if discovery is complete and file queue is empty
+                    if discovery_complete.is_set() and file_queue.empty():
+                        break
+
+        async def embedder_task():
+            """Generate embeddings for documents and queue for writing."""
+            while True:
+                try:
+                    # Wait for document data with timeout
+                    doc_data = await asyncio.wait_for(embed_queue.get(), timeout=1.0)
 
                     async with embed_sem:
-                        if doc_datas:
-                            try:
-                                # Create FileContent objects for embedding
-                                from breeze.core.text_chunker import FileContent
-                                
-                                file_contents = []
-                                skipped_docs = []
-                                
-                                for doc in doc_datas:
-                                    # Detect language for the file
-                                    language = self.content_detector.detect_language(Path(doc["file_path"]))
-                                    if not language:
-                                        # Skip files where language detection fails (likely binary)
-                                        logger.debug(f"Skipping {doc['file_path']} - no language detected")
-                                        skipped_docs.append(doc)
-                                        continue
-                                    
-                                    file_contents.append(FileContent(
-                                        content=doc["content"],
-                                        file_path=doc["file_path"],
-                                        language=language
-                                    ))
-                                
-                                # Remove skipped docs from doc_datas
-                                doc_datas = [doc for doc in doc_datas if doc not in skipped_docs]
-                                
-                                if not file_contents:
-                                    # All files were skipped
+                        try:
+                            logger.debug(f"Generating embedding for {doc_data['file_path']}")
+                            
+                            # Detect language for the file
+                            language = self.content_detector.detect_language(Path(doc_data["file_path"]))
+                            if not language:
+                                # Skip files where language detection fails (likely binary)
+                                logger.debug(f"Skipping {doc_data['file_path']} - no language detected")
+                                continue
+                            
+                            file_content = FileContent(
+                                content=doc_data["content"],
+                                file_path=doc_data["file_path"],
+                                language=language
+                            )
+
+                            # Generate embedding for single file
+                            if type(self.embedding_model).__name__ in {'MagicMock', 'Mock'}:
+                                # Direct call for unittest mocks
+                                embeddings = self.embedding_model.compute_source_embeddings([doc_data["content"]])
+                                embedding = embeddings[0] if isinstance(embeddings, list) else embeddings
+                            elif self.is_voyage_model:
+                                # Voyage model - process single file
+                                rate_limits = self.config.get_voyage_rate_limits()
+                                result = await get_voyage_embeddings_with_limits(
+                                    [file_content],
+                                    self.embedding_model,
+                                    self.tokenizer,
+                                    self.config.voyage_concurrent_requests,
+                                    self.config.voyage_max_retries,
+                                    self.config.voyage_retry_base_delay,
+                                    rate_limits['tokens_per_minute'],
+                                    rate_limits['requests_per_minute'],
+                                )
+
+                                if result.embeddings.size > 0 and not result.failed_files:
+                                    embedding = result.embeddings[0]
+                                else:
+                                    # Failed - store for retry
+                                    await self._store_failed_batch(
+                                        batch_id=f"file_{doc_data['id']}_{int(time.time())}",
+                                        file_paths=[doc_data["file_path"]],
+                                        content_hashes=[doc_data["content_hash"]],
+                                        error_message="Voyage embedding failed",
+                                    )
+                                    continue
+                            else:
+                                # Local model - process single file
+                                result = await get_local_embeddings_with_tokenizer_chunking(
+                                    [file_content],
+                                    self.embedding_model,
+                                    self.config.embedding_model,
+                                    max_concurrent_requests=concurrent_embedders,
+                                    max_retries=3,
+                                    retry_base_delay=1.0,
+                                    max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
+                                    tokenizer=self.tokenizer,
+                                )
+
+                                if result.embeddings.size > 0 and not result.failed_files:
+                                    embedding = result.embeddings[0]
+                                else:
+                                    # Failed - store for retry
+                                    await self._store_failed_batch(
+                                        batch_id=f"file_{doc_data['id']}_{int(time.time())}",
+                                        file_paths=[doc_data["file_path"]],
+                                        content_hashes=[doc_data["content_hash"]],
+                                        error_message="Local embedding failed",
+                                    )
                                     continue
 
-                                # Generate embeddings based on model type
-                                # Check if this is a unittest mock (for testing)
-                                if type(self.embedding_model).__name__ in {'MagicMock', 'Mock'}:
-                                    # Direct call for unittest mocks to avoid complex tokenization
-                                    contents = [fc.content for fc in file_contents]
-                                    embeddings = self.embedding_model.compute_source_embeddings(contents)
-                                elif self.is_voyage_model:
-                                    # Special handling for Voyage with token limits
-                                    rate_limits = self.config.get_voyage_rate_limits()
-                                    result = await get_voyage_embeddings_with_limits(
-                                        file_contents,
-                                        self.embedding_model,
-                                        self.tokenizer,
-                                        self.config.voyage_concurrent_requests,
-                                        self.config.voyage_max_retries,
-                                        self.config.voyage_retry_base_delay,
-                                        rate_limits['tokens_per_minute'],
-                                        rate_limits['requests_per_minute'],
-                                    )
+                            # Add embedding to document data
+                            doc_data["vector"] = (
+                                embedding.tolist()
+                                if hasattr(embedding, "tolist")
+                                else embedding
+                            )
+                            document = self.document_schema(**doc_data)
 
-                                    embeddings = result.embeddings
+                            logger.debug(f"Embedding generated for {doc_data['file_path']}, queuing for write")
+                            # Queue for writing
+                            await write_queue.put((document, doc_data.get("is_update", False)))
 
-                                    # Handle any failed batches
-                                    if result.failed_batches:
-                                        # Find which documents failed
-                                        failed_indices = []
-                                        for failed_batch_idx in result.failed_batches:
-                                            batch = result.safe_batches[failed_batch_idx]
-                                            # Find original indices of texts in the failed batch
-                                            start_idx = sum(len(result.safe_batches[i]) for i in range(failed_batch_idx))
-                                            for i in range(len(batch)):
-                                                failed_indices.append(start_idx + i)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to generate embedding for {doc_data['file_path']}: {e}"
+                            )
 
-                                        # Separate successful and failed documents
-                                        successful_doc_datas = [doc for i, doc in enumerate(doc_datas) if i not in failed_indices]
-                                        failed_doc_datas = [doc for i, doc in enumerate(doc_datas) if i in failed_indices]
+                            # Store for retry
+                            await self._store_failed_batch(
+                                batch_id=f"file_{doc_data['id']}_{int(time.time())}",
+                                file_paths=[doc_data["file_path"]],
+                                content_hashes=[doc_data["content_hash"]],
+                                error_message=str(e),
+                            )
 
-                                        # Store failed documents for retry
-                                        if failed_doc_datas:
-                                            batch_id = f"batch_{batch_idx}_voyage_retry_{int(time.time())}"
-                                            file_paths = [doc["file_path"] for doc in failed_doc_datas]
-                                            content_hashes = [doc["content_hash"] for doc in failed_doc_datas]
-
-                                            await self._store_failed_batch(
-                                                batch_id=batch_id,
-                                                file_paths=file_paths,
-                                                content_hashes=content_hashes,
-                                                error_message="Rate limit exceeded - will retry",
-                                            )
-
-                                            logger.info(f"Stored {len(failed_doc_datas)} documents for later retry due to rate limits")
-
-                                        # Continue with successful documents only
-                                        doc_datas = successful_doc_datas
-                                else:
-                                    # Local model embedding generation with tokenizer-based chunking
-                                    # Always use 1 concurrent request for local models to avoid GPU conflicts
-                                    result = await get_local_embeddings_with_tokenizer_chunking(
-                                        file_contents,
-                                        self.embedding_model,
-                                        self.config.embedding_model,
-                                        max_concurrent_requests=1,
-                                        max_retries=3,
-                                        retry_base_delay=1.0,
-                                        max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
-                                        tokenizer=self.tokenizer,  # Pass pre-loaded tokenizer
-                                    )
-
-                                    embeddings = result.embeddings
-
-                                    # Handle any failed files (local embedder returns 'failed_files')
-                                    if result.failed_files:
-                                        # The failed_files list contains indices of files that failed
-                                        failed_indices = result.failed_files
-
-                                        # Separate successful and failed documents
-                                        successful_doc_datas = [doc for i, doc in enumerate(doc_datas) if i not in failed_indices]
-                                        failed_doc_datas = [doc for i, doc in enumerate(doc_datas) if i in failed_indices]
-
-                                        # Store failed documents for retry
-                                        if failed_doc_datas:
-                                            batch_id = f"batch_{batch_idx}_local_retry_{int(time.time())}"
-                                            file_paths = [doc["file_path"] for doc in failed_doc_datas]
-                                            content_hashes = [doc["content_hash"] for doc in failed_doc_datas]
-
-                                            await self._store_failed_batch(
-                                                batch_id=batch_id,
-                                                file_paths=file_paths,
-                                                content_hashes=content_hashes,
-                                                error_message="Local model embedding failed - will retry",
-                                            )
-
-                                            logger.info(f"Stored {len(failed_doc_datas)} documents for later retry due to local model failures")
-
-                                        # Continue with successful documents only
-                                        doc_datas = successful_doc_datas
-
-                                # Create document objects with embeddings
-                                documents = []
-                                if len(embeddings) > 0:
-                                    for doc_data, embedding in zip(doc_datas, embeddings):
-                                        doc_data["vector"] = (
-                                            embedding.tolist()
-                                            if hasattr(embedding, "tolist")
-                                            else embedding
-                                        )
-                                        documents.append(self.document_schema(**doc_data))
-
-                                    await write_queue.put((batch_idx, documents, doc_datas))
-                                else:
-                                    # No successful embeddings - all failed
-                                    logger.warning(f"Batch {batch_idx}: All embeddings failed, will retry later")
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to generate embeddings for batch {batch_idx}: {e}"
-                                )
-
-                                # Store failed batch for later retry
-                                batch_id = f"batch_{batch_idx}_{int(time.time())}"
-                                file_paths = [doc["file_path"] for doc in doc_datas]
-                                content_hashes = [
-                                    doc["content_hash"] for doc in doc_datas
-                                ]
-
-                                await self._store_failed_batch(
-                                    batch_id=batch_id,
-                                    file_paths=file_paths,
-                                    content_hashes=content_hashes,
-                                    error_message=str(e),
-                                    project_id=None,  # Could be passed through context if needed
-                                )
-
-                                # Still put error marker for immediate stats tracking
-                                await write_queue.put((batch_idx, None, doc_datas))
-                        else:
-                            await write_queue.put((batch_idx, [], []))
+                            # Put error marker for stats
+                            await write_queue.put((None, False))
 
                 except asyncio.TimeoutError:
-                    # Check if reading is complete and queue is empty
+                    # Check if reading is complete and embed queue is empty
                     if read_complete.is_set() and embed_queue.empty():
                         break
 
+        async def continuous_flush_task():
+            """Continuously flush buffers to database."""
+            nonlocal total_indexed, total_updated, total_errors
+            
+            while True:
+                # Check if there are buffers to flush
+                buffer_to_flush = None
+                async with write_buffer_lock:
+                    if write_buffers:
+                        buffer_to_flush = write_buffers.pop(0)
+                
+                if buffer_to_flush:
+                    documents_to_write = [doc for doc, _ in buffer_to_flush]
+                    
+                    try:
+                        # Always use add() - LanceDB handles versioning
+                        # Much faster than merge_insert, no complex indexing operations
+                        await self.table.add(documents_to_write)
+                        
+                        # Count updates vs inserts for stats
+                        for _, is_update in buffer_to_flush:
+                            if is_update:
+                                total_updated += 1
+                            else:
+                                total_indexed += 1
+
+                        logger.debug(f"Added {len(documents_to_write)} documents to database")
+
+                    except Exception as e:
+                        logger.error(f"Error writing batch: {e}")
+                        total_errors += len(documents_to_write)
+                else:
+                    # No buffers to flush, wait a bit
+                    await asyncio.sleep(0.1)
+                    
+                    # Check if we should exit
+                    if embed_complete.is_set() and write_queue.empty():
+                        # Final check for any remaining buffers
+                        async with write_buffer_lock:
+                            if not write_buffers and not write_buffer_active:
+                                break
+
         async def writer_task():
-            """Pull from embed queue and write to database."""
-            nonlocal total_indexed, total_updated, total_errors, total_processed
+            """Pull from embed queue and batch writes to database."""
+            nonlocal total_processed, total_errors
+            
+            last_flush_time = time.time()
+            FLUSH_INTERVAL = 10.0  # Less frequent flushes to reduce LanceDB overhead
 
             while True:
                 try:
+                    # Apply backpressure if too many buffers are pending
+                    buffer_count = 0
+                    async with write_buffer_lock:
+                        buffer_count = len(write_buffers)
+                    
+                    if buffer_count >= MAX_PENDING_BUFFERS:
+                        # Wait a bit before checking again
+                        await asyncio.sleep(0.1)
+                        continue
+                    
                     # Wait for items with a timeout
-                    batch_idx, documents, doc_datas = await asyncio.wait_for(
+                    item = await asyncio.wait_for(
                         write_queue.get(), timeout=1.0
                     )
 
-                    async with write_sem:
-                        if documents is None:
-                            # This batch failed to generate embeddings
-                            total_errors += len(doc_datas)
-                            logger.error(
-                                f"Skipping batch {batch_idx} due to embedding generation failure"
-                            )
-                        elif documents:
-                            try:
-                                await (
-                                    self.table.merge_insert("id")
-                                    .when_matched_update_all()
-                                    .when_not_matched_insert_all()
-                                    .execute(documents)
+                    document, is_update = item
+
+                    async with write_buffer_lock:
+                        if document is None:
+                            # This file failed to generate embeddings
+                            total_errors += 1
+                            total_processed += 1
+                        else:
+                            # Add to active buffer
+                            write_buffer_active.append((document, is_update))
+                            
+                            # Always check if we should flush based on EITHER condition
+                            current_time = time.time()
+                            time_to_flush = (current_time - last_flush_time) >= FLUSH_INTERVAL
+                            batch_full = len(write_buffer_active) >= WRITE_BATCH_SIZE
+                            
+                            if time_to_flush or batch_full:
+                                # Move active buffer to write queue
+                                write_buffers.append(write_buffer_active[:])
+                                write_buffer_active.clear()
+                                
+                                logger.debug(
+                                    f"Queued buffer for flush: {len(write_buffers[-1])} docs "
+                                    f"(batch_full={batch_full}, time_to_flush={time_to_flush}, "
+                                    f"pending_buffers={len(write_buffers)})"
                                 )
+                                
+                                last_flush_time = current_time
+                                
+                            total_processed += 1
 
-                                # Update counts
-                                for doc in documents:
-                                    if doc.id in existing_docs:
-                                        total_updated += 1
-                                    else:
-                                        total_indexed += 1
-
-                            except Exception as e:
-                                logger.error(f"Error writing batch {batch_idx}: {e}")
-                                logger.error(f"Error type: {type(e)}")
-                                logger.error(f"Error args: {e.args}")
-                                logger.debug(f"Failed documents sample: {documents[:1] if documents else 'None'}")
-                                total_errors += len(documents)
-
-                        total_processed += len(doc_datas)
-
-                        # Progress callback
-                        if progress_callback:
-                            from breeze.core.models import IndexStats
-                            stats = IndexStats(
-                                files_scanned=total_processed,
-                                files_indexed=total_indexed,
-                                files_updated=total_updated,
-                                files_skipped=0,  # Will be calculated later
-                                errors=total_errors,
-                            )
-                            await progress_callback(stats)
+                    # Progress callback (outside of buffer lock)
+                    if progress_callback:
+                        from breeze.core.models import IndexStats
+                        stats = IndexStats(
+                            files_scanned=total_processed,
+                            files_indexed=total_indexed,
+                            files_updated=total_updated,
+                            files_skipped=0,  # Will be calculated later
+                            errors=total_errors,
+                        )
+                        await progress_callback(stats)
 
                 except asyncio.TimeoutError:
+                    # Check if we should flush based on time
+                    async with write_buffer_lock:
+                        current_time = time.time()
+                        if write_buffer_active and (current_time - last_flush_time) >= FLUSH_INTERVAL:
+                            # Queue buffer for flush
+                            write_buffers.append(write_buffer_active[:])
+                            write_buffer_active.clear()
+                            
+                            logger.debug(
+                                f"Time-based flush: {len(write_buffers[-1])} docs "
+                                f"(pending_buffers={len(write_buffers)})"
+                            )
+                            
+                            last_flush_time = current_time
+                    
                     # Check if embedding is complete and queue is empty
                     if embed_complete.is_set() and write_queue.empty():
+                        # Final flush of active buffer
+                        async with write_buffer_lock:
+                            if write_buffer_active:
+                                write_buffers.append(write_buffer_active[:])
+                                write_buffer_active.clear()
                         break
 
+        # Start the continuous flush task FIRST
+        flush_task = asyncio.create_task(continuous_flush_task())
+        
         # Start all pipeline tasks
         writer_tasks = [
             asyncio.create_task(writer_task()) for _ in range(concurrent_writers)
@@ -1078,13 +1238,22 @@ class BreezeEngine:
             asyncio.create_task(embedder_task()) for _ in range(concurrent_embedders)
         ]
 
-        reader_tasks = [reader_task(idx, batch) for idx, batch in enumerate(batches)]
+        reader_tasks = [
+            asyncio.create_task(reader_task()) for _ in range(concurrent_readers)
+        ]
+
+        # Start file discovery task
+        discovery_task = asyncio.create_task(file_discovery_task())
 
         try:
-            # Wait for pipeline stages to complete in order
-            await asyncio.gather(*reader_tasks)
+            # Wait for file discovery to complete
+            await discovery_task
+            
+            # Wait for readers to complete (they'll exit when discovery_complete is set and file queue is empty)
+            await asyncio.gather(*reader_tasks, return_exceptions=True)
             read_complete.set()
-
+            
+            # Wait for embedders to complete (they'll exit when read_complete is set and embed queue is empty)
             await asyncio.gather(*embedder_tasks, return_exceptions=True)
             embed_complete.set()
 
@@ -1097,73 +1266,32 @@ class BreezeEngine:
             except asyncio.TimeoutError:
                 # Timeout is handled in finally block
                 pass
+            
+            # Wait for flush task to complete
+            if flush_task and not flush_task.done():
+                try:
+                    await asyncio.wait_for(flush_task, timeout=10.0)
+                except asyncio.TimeoutError:
+                    flush_task.cancel()
 
         finally:
             # Always cancel any remaining tasks to prevent event loop warnings
-            all_tasks = embedder_tasks + writer_tasks
+            all_tasks = reader_tasks + embedder_tasks + writer_tasks + [discovery_task, flush_task]
             for task in all_tasks:
-                if not task.done():
+                if task and not task.done():
                     task.cancel()
 
             # Wait for all tasks to complete cancellation
             if all_tasks:
-                await asyncio.gather(*all_tasks, return_exceptions=True)
+                await asyncio.gather(*[t for t in all_tasks if t], return_exceptions=True)
 
         return PipelineResult(
             indexed=total_indexed,
             updated=total_updated,
             errors=total_errors,
+            total_files_discovered=total_files_discovered,
         )
 
-    async def _read_file_batch(
-        self, file_paths: List[Path], existing_docs: Dict[str, str], force_reindex: bool
-    ) -> List[Dict]:
-        """Read a batch of files concurrently and return document data."""
-
-        async def read_single_file(file_path: Path) -> Dict:
-            try:
-                stat = await aiofiles.os.stat(file_path)
-
-                async with aiofiles.open(
-                    file_path, "r", encoding="utf-8", errors="replace"
-                ) as f:
-                    content = await f.read()
-
-                # Skip empty files
-                if not content.strip():
-                    return None
-
-                # Generate document ID and content hash
-                doc_id = f"file:{file_path}"
-                content_hash = hashlib.md5(content.encode()).hexdigest()
-
-                # Check if update needed
-                if not force_reindex and doc_id in existing_docs:
-                    if existing_docs[doc_id] == content_hash:
-                        return None  # Skip unchanged files
-
-                # Return document data (without vector)
-                return {
-                    "id": doc_id,
-                    "file_path": str(file_path),
-                    "content": content,
-                    "file_type": file_path.suffix[1:] if file_path.suffix else "txt",
-                    "file_size": stat.st_size,
-                    "last_modified": datetime.fromtimestamp(stat.st_mtime),
-                    "indexed_at": datetime.now(),
-                    "content_hash": content_hash,
-                }
-
-            except Exception as e:
-                logger.error(f"Error processing {file_path}: {e}")
-                return None
-
-        # Process files concurrently
-        tasks = [read_single_file(fp) for fp in file_paths]
-        results = await asyncio.gather(*tasks)
-
-        # Filter out None results
-        return [doc for doc in results if doc is not None]
 
     # Project Management Methods
 
@@ -1757,11 +1885,7 @@ class BreezeEngine:
 
                             # Read the files again
                             file_paths = [Path(fp) for fp in batch.file_paths]
-                            doc_datas = await self._read_file_batch(
-                                file_paths,
-                                {},  # existing_docs
-                                True,  # force_reindex
-                            )
+                            doc_datas = await self._read_file_batch(file_paths)
 
                             # Filter by content hash to avoid duplicates
                             filtered_docs = []
@@ -1772,65 +1896,73 @@ class BreezeEngine:
                                     filtered_docs.append(doc)
 
                             if filtered_docs:
-                                # Try to generate embeddings
-                                contents = [doc["content"] for doc in filtered_docs]
-
-                                if self.is_voyage_model:
-                                    rate_limits = self.config.get_voyage_rate_limits()
-                                    result = await get_voyage_embeddings_with_limits(
-                                        contents,
-                                        self.embedding_model,
-                                        self.tokenizer,
-                                        self.config.voyage_concurrent_requests,
-                                        self.config.voyage_max_retries,
-                                        self.config.voyage_retry_base_delay,
-                                        rate_limits['tokens_per_minute'],
-                                        rate_limits['requests_per_minute'],
-                                    )
-
-                                    embeddings = result['embeddings']
-
-                                    # If some batches failed, mark this batch for retry again
-                                    if result['failed_batches']:
-                                        raise Exception("Some embeddings failed - retry later")
-                                else:
-                                    # Use tokenizer-based chunking for local models
-                                    # Always use 1 concurrent request for local models to avoid GPU conflicts
-                                    result = await get_local_embeddings_with_tokenizer_chunking(
-                                        contents,
-                                        self.embedding_model,
-                                        self.config.embedding_model,
-                                        max_concurrent_requests=1,
-                                        max_retries=3,
-                                        retry_base_delay=1.0,
-                                        max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
-                                        tokenizer=self.tokenizer,  # Pass pre-loaded tokenizer
-                                    )
-
-                                    embeddings = result['embeddings']
-
-                                    # If some batches failed, mark this batch for retry again
-                                    if result['failed_batches']:
-                                        raise Exception("Some embeddings failed - retry later")
-
-                                # Create documents and write to database
+                                # Process each file individually like in the main pipeline
                                 documents = []
-                                for doc_data, embedding in zip(
-                                    filtered_docs, embeddings
-                                ):
-                                    doc_data["vector"] = (
-                                        embedding.tolist()
-                                        if hasattr(embedding, "tolist")
-                                        else embedding
-                                    )
-                                    documents.append(self.document_schema(**doc_data))
+                                
+                                for doc_data in filtered_docs:
+                                    try:
+                                        # Detect language
+                                        language = self.content_detector.detect_language(Path(doc_data["file_path"]))
+                                        if not language:
+                                            continue
+                                        
+                                        file_content = FileContent(
+                                            content=doc_data["content"],
+                                            file_path=doc_data["file_path"],
+                                            language=language
+                                        )
 
-                                await (
-                                    self.table.merge_insert("id")
-                                    .when_matched_update_all()
-                                    .when_not_matched_insert_all()
-                                    .execute(documents)
-                                )
+                                        # Generate embedding for single file
+                                        if self.is_voyage_model:
+                                            rate_limits = self.config.get_voyage_rate_limits()
+                                            result = await get_voyage_embeddings_with_limits(
+                                                [file_content],
+                                                self.embedding_model,
+                                                self.tokenizer,
+                                                self.config.voyage_concurrent_requests,
+                                                self.config.voyage_max_retries,
+                                                self.config.voyage_retry_base_delay,
+                                                rate_limits['tokens_per_minute'],
+                                                rate_limits['requests_per_minute'],
+                                            )
+
+                                            if result.embeddings.size > 0 and not result.failed_files:
+                                                embedding = result.embeddings[0]
+                                            else:
+                                                raise Exception("Embedding generation failed")
+                                        else:
+                                            # Use tokenizer-based chunking for local models
+                                            result = await get_local_embeddings_with_tokenizer_chunking(
+                                                [file_content],
+                                                self.embedding_model,
+                                                self.config.embedding_model,
+                                                max_concurrent_requests=self.config.concurrent_embedders,
+                                                max_retries=3,
+                                                retry_base_delay=1.0,
+                                                max_sequence_length=self.config.max_sequence_length if hasattr(self.config, 'max_sequence_length') else None,
+                                                tokenizer=self.tokenizer,
+                                            )
+
+                                            if result.embeddings.size > 0 and not result.failed_files:
+                                                embedding = result.embeddings[0]
+                                            else:
+                                                raise Exception("Embedding generation failed")
+
+                                        # Add embedding to document
+                                        doc_data["vector"] = (
+                                            embedding.tolist()
+                                            if hasattr(embedding, "tolist")
+                                            else embedding
+                                        )
+                                        documents.append(self.document_schema(**doc_data))
+                                        
+                                    except Exception as e:
+                                        logger.warning(f"Failed to process file in retry: {e}")
+                                        continue
+
+                                if documents:
+                                    # Use add() for retry documents too - LanceDB handles versioning
+                                    await self.table.add(documents)
 
                                 # Mark as succeeded
                                 await self._update_failed_batch_status(

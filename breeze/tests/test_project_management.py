@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 
 from breeze.core.engine import BreezeEngine
 from breeze.core.config import BreezeConfig
-from breeze.core.models import Project
 from lancedb.embeddings.registry import get_registry
 from .mock_embedders import MockReranker
 
