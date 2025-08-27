@@ -2,7 +2,8 @@ use std::borrow::Cow;
 
 use crate::app::{Project, Task};
 use crate::cli::OutputMode;
-use comfy_table::{Cell, ContentArrangement, Table, presets::ASCII_MARKDOWN};
+use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL};
+use humantime_fmt;
 
 pub trait ColumnSpec: Sized + Copy + 'static {
   type Entity;
@@ -71,7 +72,7 @@ impl Formatter {
       Formatter::Table => {
         let mut table = Table::new();
         table
-          .load_preset(ASCII_MARKDOWN)
+          .load_preset(UTF8_FULL)
           .set_content_arrangement(ContentArrangement::Dynamic);
         if opts.headers {
           table.set_header(
@@ -285,7 +286,9 @@ impl ColumnSpec for TaskCol {
       Self::Id => Cow::Owned(t.id.to_string()),
       Self::Project => Cow::Owned(t.project_id.to_string()),
       Self::Status => Cow::Owned(t.status.to_string()),
-      Self::Created => Cow::Owned(t.created_at.to_string()),
+      Self::Created => Cow::Owned(humantime_fmt::format_relative(
+        t.created_at.and_utc().into(),
+      )),
       Self::Files => Cow::Owned(
         t.files_indexed
           .map(|v| v.to_string())

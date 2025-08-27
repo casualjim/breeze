@@ -41,6 +41,7 @@ console-subscriber = "0.4.1"
 dirs = "6.0"
 
 human-units = { version = "0.5", features = ["serde", "si-units"] }
+humantime_fmt = { version = "0.1.0", features = ["with-chrono"] }
 
 hyperpolyglot = { version = "0.1.7", optional = true }     # Language detection
 ignore = { version = "0.4.23", features = ["simd-accel"], optional = true }

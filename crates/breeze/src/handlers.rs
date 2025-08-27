@@ -4,6 +4,7 @@ use crate::app::SearchRequest;
 #[cfg(feature = "perfprofiling")]
 use crate::cli::DebugCommands;
 use crate::cli::{OutputMode, ProjectCommands, SearchGranularity, TaskCommands};
+use humantime_fmt;
 use std::path::PathBuf;
 use syntastica::language_set::SupportedLanguage;
 use tracing::{error, info};
@@ -52,8 +53,8 @@ async fn handle_project_show(app: App, id: String) -> Result<(), i32> {
       if let Some(desc) = &project.description {
         println!("Description: {}", desc);
       }
-      println!("Created: {}", project.created_at);
-      println!("Updated: {}", project.updated_at);
+      println!("Created: {}", humantime_fmt::format_relative(project.created_at.and_utc().into()));
+      println!("Updated: {}", humantime_fmt::format_relative(project.updated_at.and_utc().into()));
       Ok(())
     }
     Err(e) => {
@@ -70,12 +71,12 @@ async fn handle_task_show(app: App, id: String) -> Result<(), i32> {
       println!("Project ID: {}", task.project_id);
       println!("Path: {}", task.path);
       println!("Status: {}", task.status);
-      println!("Created: {}", task.created_at);
+      println!("Created: {}", humantime_fmt::format_relative(task.created_at.and_utc().into()));
       if let Some(started) = task.started_at {
-        println!("Started: {}", started);
+        println!("Started: {}", humantime_fmt::format_relative(started.and_utc().into()));
       }
       if let Some(completed) = task.completed_at {
-        println!("Completed: {}", completed);
+        println!("Completed: {}", humantime_fmt::format_relative(completed.and_utc().into()));
       }
       if let Some(error) = &task.error {
         println!("Error: {}", error);
