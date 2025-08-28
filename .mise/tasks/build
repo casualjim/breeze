@@ -5,6 +5,9 @@ proj_dir=$(git rev-parse --show-toplevel)
 
 set -euo pipefail
 
+# Ensure workspace-hack is current before builds
+cargo hakari generate --quiet
+
 cargo zigbuild --release --workspace --exclude breeze-py --exclude breeze-napi
 cd "$proj_dir/crates/breeze-py" && maturin develop --release
 cd "$proj_dir/crates/breeze-napi" && npm run build

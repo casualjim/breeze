@@ -7,6 +7,7 @@ build = "build.rs"
 [dependencies]
 tree-sitter.workspace = true
 tree-sitter-language.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
@@ -15,5 +16,5 @@ num_cpus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tar = "0.4"
-ureq = "3.0"
 which = "8.0"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

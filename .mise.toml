@@ -14,6 +14,7 @@ zig = "latest"
 "aqua:protocolbuffers/protobuf/protoc" = "latest"
 node = "20"
 "ubi:j178/prek" = "0.1.2"
+"cargo:cargo-hakari" = "latest"
 
 [env]
 _.file = ".env"

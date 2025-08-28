@@ -1,1 +1,1 @@
-/Users/ivan/github/casualjim/breeze-rustle.remove-document/AGENTS.md
+AGENTS.md

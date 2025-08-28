@@ -91,3 +91,7 @@ output.map
 
 aqua.yaml
 /deploy/volumes
+
+# Sensitive files
+QWEN.md
+qwen-cerebras.sh

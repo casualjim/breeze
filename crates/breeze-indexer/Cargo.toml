@@ -21,13 +21,13 @@ accelerate = [
     "candle-nn/accelerate",
     "candle-transformers/accelerate",
 ]
-metal = ["candle-core/metal", "candle-nn/metal", "ort/coreml"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 testing = []
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["load-dynamic", "half"], optional = true }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic", "half"], optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.10", features = ["half", "coreml"], optional = true }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic", "half", "coreml"], optional = true }
 
 [dependencies]
 accelerate-src = { version = "0.3.2", optional = true }
@@ -56,7 +56,7 @@ futures-util.workspace = true
 hex = "0.4"
 
 # Additional dependencies for embeddings
-hf-hub = { version = "0.4.2", features = ["rustls-tls", "tokio", "ureq"], default-features = false }
+hf-hub = { version = "0.4.2", features = ["rustls-tls", "tokio"], default-features = false }
 http = "1.2"
 humantime = "2.1"
 intel-mkl-src = { version = "0.8.1", optional = true }
@@ -87,8 +87,13 @@ tokio-util.workspace = true
 tracing.workspace = true
 typed-builder = "0.21"
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 toml = "0.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wiremock = "0.6"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[build-dependencies]
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

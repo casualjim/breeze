@@ -40,7 +40,7 @@ pin-project-lite.workspace = true
 prometheus = "0.14.0"
 
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = ["transport-worker", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
-rustls = "0.23.28"
+rustls = { version = "0.23.28", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-acme = { version = "0.14.0", features = [
   "axum",
   "tls12",
@@ -70,6 +70,11 @@ tracing.workspace = true
 
 url = { version = "2", features = ["serde"] }
 uuid = { workspace = true, features = ["serde"] }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 axum-test = "17"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[build-dependencies]
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

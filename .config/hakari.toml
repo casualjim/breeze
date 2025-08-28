@@ -1,0 +1,86 @@
+# This file contains settings for `cargo hakari`.
+# See https://docs.rs/cargo-hakari/latest/cargo_hakari/config for a full list of options.
+
+hakari-package = "workspace-hack"
+
+# Format version for hakari's output. Version 4 requires cargo-hakari 0.9.22 or above.
+dep-format-version = "4"
+
+# Setting workspace.resolver = "2" or higher in the root Cargo.toml is HIGHLY recommended.
+# Hakari works much better with the v2 resolver. (The v2 and v3 resolvers are identical from
+# hakari's perspective, so you're welcome to set either.)
+#
+# For more about the new feature resolver, see:
+# https://blog.rust-lang.org/2021/03/25/Rust-1.51.0.html#cargos-new-feature-resolver
+resolver = "3"
+
+# Make host (build-deps) replicate the selected target triple to avoid dual feature sets.
+unify-target-host = "replicate-target-on-host"
+
+# Add triples corresponding to platforms commonly used by developers here.
+# https://doc.rust-lang.org/rustc/platform-support.html
+platforms = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+# Exclude packages with platform-specific or heavy optional features from unification early
+# so they never get pulled into the hack crate and don't require version pins.
+[traversal-excludes]
+third-party = [
+    { name = "reqwest" },
+    { name = "hyper-rustls" },
+    { name = "tokio-rustls" },
+    { name = "candle-core" },
+    { name = "candle-nn" },
+    { name = "candle-transformers" },
+    { name = "security-framework" },
+    { name = "security-framework-sys" },
+    { name = "windows-sys" },
+    { name = "winapi" },
+    # High-churn or host/target-divergent crates excluded from unification to make verify pass
+    { name = "bitflags" },
+    { name = "getrandom" },
+    { name = "cc" },
+    { name = "http" },
+    { name = "httparse" },
+    { name = "libc" },
+    { name = "linux-raw-sys" },
+    { name = "log" },
+    { name = "ring" },
+    { name = "rustix" },
+    { name = "half" },
+    { name = "ndarray" },
+    { name = "num-integer" },
+    { name = "num-traits" },
+    { name = "num-complex" },
+    { name = "brotli" },
+    { name = "digest" },
+    { name = "mio" },
+    { name = "rustls" },
+    { name = "rustls-webpki" },
+    { name = "rustls-pemfile" },
+    { name = "ureq" },
+    { name = "tracing" },
+    { name = "tracing-core" },
+    { name = "syn" },
+]
+
+# Write out exact versions rather than a semver range. (Defaults to false.)
+# exact-versions = true
+
+# Exclude specific packages from the final hack crate by exact version to prevent
+# platform-specific ML backends from being unified globally.
+[final-excludes]
+third-party = [
+    { name = "ort", version = "2.0.0-rc.10" },
+    { name = "ort-sys", version = "2.0.0-rc.10" },
+]
+
+# Exclude certain crates from verification entirely (kept opt-in and per-target)
+[verify-excludes]
+third-party = [
+    { name = "ort" },
+    { name = "ort-sys" },
+]
