@@ -1,21 +1,20 @@
-name: 'Setup Build Environment'
-description: 'Sets up the complete build environment for breeze-rustle'
+name: "Setup Build Environment"
+description: "Sets up the complete build environment for breeze-rustle"
 # Policy: This composite action is intentionally comprehensive and must not be split into
 # "lighter variants". All jobs should use this action as-is.
 inputs:
   python-version:
-    description: 'Python version to use'
+    description: "Python version to use"
     required: false
-    default: '3.12'
+    default: "3.12"
   rust-target:
-    description: 'Rust target triple to install (optional)'
+    description: "Rust target triple to install (optional)"
     required: false
-    default: ''
+    default: ""
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
-
     - name: Install mold linker and C++ libraries on Linux
       if: runner.os == 'Linux'
       run: |
@@ -47,20 +46,20 @@ runs:
         experimental: true
         install: false
 
-     - name: Install tools with mise
-       run: mise install
-       shell: bash
-       env:
-         MISE_PYTHON_UV_VENV_CREATE_ARGS: "--python python${{ inputs.python-version }}"
-         GITHUB_TOKEN: ${{ github.token }}
+    - name: Install tools with mise
+      run: mise install
+      shell: bash
+      env:
+        MISE_PYTHON_UV_VENV_CREATE_ARGS: "--python python${{ inputs.python-version }}"
+        GITHUB_TOKEN: ${{ github.token }}
 
-     - name: Sync workspace-hack
-       run: |
-         cargo hakari generate --quiet
-         cargo hakari manage-deps --dry-run
-       shell: bash
+    - name: Sync workspace-hack
+      run: |
+        cargo hakari generate --quiet
+        cargo hakari manage-deps --dry-run
+      shell: bash
 
-     - name: Download and setup ONNX Runtime on Linux
+    - name: Download and setup ONNX Runtime on Linux
       if: runner.os == 'Linux'
       run: |
         # Download ONNX Runtime

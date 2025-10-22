@@ -10,7 +10,7 @@
   "name": "breeze-rustle",
   "private": true,
   "scripts": {
-    "postinstall": "echo 'Tree-sitter parsers installed at:' && npx @kumos/tree-sitter-parsers"
+    "postinstall": "echo 'Tree-sitter parsers installed at:' && bunx @kumos/tree-sitter-parsers"
   },
   "version": "0.1.0"
 }

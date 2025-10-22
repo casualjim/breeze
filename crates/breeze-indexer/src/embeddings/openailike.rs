@@ -166,7 +166,7 @@ impl EmbeddingProvider for OpenAILikeEmbeddingProvider {
           self
             .tokenizer
             .count_tokens(input.text)
-            .unwrap_or_else(|_| (input.text.len() / 4)) as u32
+            .unwrap_or_else(|_| input.text.len() / 4) as u32
         }
       })
       .sum();

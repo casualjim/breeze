@@ -24,6 +24,8 @@
         <string>error,breeze=info</string>
         <key>HF_HUB_DISABLE_PROGRESS_BARS</key>
         <string>1</string>
+        <key>ORT_DYLIB_PATH</key>
+        <string>/opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib</string>
     </dict>
 
     <key>StandardOutPath</key>

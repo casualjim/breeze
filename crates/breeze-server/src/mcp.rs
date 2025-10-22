@@ -353,6 +353,20 @@ fn canonicalize_nearest_ancestor(p: &std::path::Path) -> std::io::Result<String>
 #[tool_handler]
 impl ServerHandler for BreezeService {
   fn get_info(&self) -> ServerInfo {
+    let title = env!("CARGO_PKG_DESCRIPTION");
+    let title = if title.trim().is_empty() {
+      None
+    } else {
+      Some(title.to_string())
+    };
+
+    let website_url = env!("CARGO_PKG_HOMEPAGE");
+    let website_url = if website_url.trim().is_empty() {
+      None
+    } else {
+      Some(website_url.to_string())
+    };
+
     ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder()
@@ -364,8 +378,11 @@ impl ServerHandler for BreezeService {
                 .enable_tools()
                 .build(),
             server_info: Implementation {
-                name: "breeze-mcp".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+              name:"breeze-mcp".to_string(),
+              version:env!("CARGO_PKG_VERSION").to_string(),
+              title,
+              icons: None,
+              website_url,
             },
             instructions: Some("Breeze MCP server provides semantic code search and indexing capabilities. Use 'search_code' to search through indexed code and 'create_project' to index new directories.".to_string()),
         }

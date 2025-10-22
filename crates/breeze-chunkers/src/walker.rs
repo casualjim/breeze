@@ -650,6 +650,7 @@ fn process_file<P: AsRef<Path>>(
   async_stream::try_stream! {
       let path_str = path.to_string_lossy().to_string();
 
+
       // First check if it's a text file using infer (this only reads a few bytes)
       let is_text_file = if let Ok(Some(file_type)) = infer::get_from_path(&path) {
           file_type.matcher_type() == infer::MatcherType::Text

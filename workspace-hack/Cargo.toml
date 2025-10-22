@@ -60,9 +60,10 @@ prost = { version = "0.13", features = ["prost-derive"] }
 prost-types = { version = "0.13" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "unicode"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
 sha2 = { version = "0.10", features = ["oid"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -76,7 +77,6 @@ tokio-util = { version = "0.7", features = ["codec", "compat", "io"] }
 tower = { version = "0.5", default-features = false, features = ["log", "make", "util"] }
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["js", "serde", "v4", "v7", "zerocopy"] }
 winnow = { version = "0.7" }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
@@ -134,9 +134,10 @@ prost-types = { version = "0.13" }
 quote = { version = "1" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "unicode"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
 sha2 = { version = "0.10", features = ["oid"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -150,7 +151,6 @@ tokio-util = { version = "0.7", features = ["codec", "compat", "io"] }
 tower = { version = "0.5", default-features = false, features = ["log", "make", "util"] }
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["js", "serde", "v4", "v7", "zerocopy"] }
 winnow = { version = "0.7" }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
@@ -160,21 +160,21 @@ zstd-safe = { version = "7", default-features = false, features = ["arrays", "ex
 zstd-sys = { version = "2", default-features = false, features = ["experimental", "legacy", "std", "zdict_builder"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 
 [target.aarch64-unknown-linux-gnu.build-dependencies]
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 
 [target.aarch64-apple-darwin.dependencies]
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 
 ### END HAKARI SECTION
