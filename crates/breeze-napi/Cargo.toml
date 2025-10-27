@@ -13,7 +13,7 @@ breeze-indexer = { path = "../breeze-indexer" }
 flume = { workspace = true }
 futures = { workspace = true }
 napi = { version = "3.2.4", features = ["full", "web_stream"] }
-napi-derive = "3.2.4"
+napi-derive = "3.3.0"
 pin-project-lite = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
